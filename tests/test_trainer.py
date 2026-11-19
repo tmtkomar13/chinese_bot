@@ -47,6 +47,7 @@ class TrainingTest(unittest.TestCase):
         self.assertFalse(self.db.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_full_round_restart_reimport_and_backup(self):
+        self.action("translations 0")
         prompt = self.action("start")
         tasks = list(self.db.execute("SELECT t.card,c.lesson FROM tasks t JOIN cards c ON t.card=c.id ORDER BY t.number"))
         self.assertEqual(len(set(r["card"] for r in tasks)), 10)
@@ -70,7 +71,7 @@ class TrainingTest(unittest.TestCase):
             grade = "known" if number == 2 else "yes"
             result = self.action(f"{grade} 1 {number}")
         self.assertEqual(result["text"], "Тренировка завершена.\nВспомнил — 8\nНе вспомнил — 1\nТочно знаю — 1")
-        self.assertEqual(self.action("stats")["text"], "Попытки — 9\nОшибки — 1\nТочно знаю — 1")
+        self.assertEqual(self.action("stats")["text"], "Попытки — 9\nОшибки — 1\nТочно знаю — 1\nПереводов выполнено — 0\nС первой попытки — 0\nПропущено — 0")
         self.assertNotIn(tasks[1]["card"], select_cards(self.db, OWNER))
         self.assertIn(tasks[0]["card"], select_cards(self.db, OWNER))
         copy = backup(self.db, self.directory / "backups")
@@ -81,6 +82,7 @@ class TrainingTest(unittest.TestCase):
         self.assertIn("Точно знаю — 0", self.action("stats")["text"])
 
     def test_selection_and_small_pool(self):
+        self.action("translations 0")
         self.action("lesson 1")
         self.db.execute("""
             INSERT INTO progress(learner,card,attempts,errors,last_grade)
@@ -101,7 +103,8 @@ class TrainingTest(unittest.TestCase):
         self.action("start")
         self.action("show 1 1")
         self.action("known 1 1")
-        self.assertIn("Нет доступных", self.action("start")["text"])
+        self.assertIn("завершена", self.action("start")["text"])
+        self.assertIn("Нет доступных", self.action("extra 1")["text"])
 
     def test_backup_retention(self):
         directory = self.directory / "backups"
@@ -135,7 +138,7 @@ class TrainingTest(unittest.TestCase):
         deliver(self.db, api, OWNER)
         self.assertEqual(api.messages.send.call_args_list[1], first)
         self.assertEqual(api.messages.send.call_count, 4)
-        self.assertFalse(self.db.execute("SELECT id FROM vk_messages WHERE reply IS NOT NULL").fetchall())
+        self.assertFalse(self.db.execute("SELECT id FROM outbox").fetchall())
 
     def test_vk_library_and_reconnect(self):
         import requests
@@ -149,7 +152,7 @@ class TrainingTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT count(*) FROM sessions").fetchone()[0], 1)
         self.assertEqual(self.db.execute("SELECT ts FROM vk_cursor").fetchone()[0], "101")
         with patch.dict("os.environ", VK_GROUP_ID="15", VK_OWNER_ID=str(OWNER), VK_TOKEN="test"), \
-                patch("vk_api.VkApi"), patch("vk_api.bot_longpoll.VkBotLongPoll") as connect, \
+                patch("trainer.vk.work"), patch("vk_api.VkApi"), patch("vk_api.bot_longpoll.VkBotLongPoll") as connect, \
                 patch("trainer.vk.time.sleep") as sleep:
             poll.check.side_effect = [requests.ConnectionError, requests.Timeout, KeyboardInterrupt]
             connect.return_value = poll

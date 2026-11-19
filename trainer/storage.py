@@ -2,6 +2,7 @@ import csv
 import os
 import sqlite3
 import tempfile
+import uuid
 import unicodedata
 from contextlib import closing, contextmanager
 from datetime import date
@@ -31,6 +32,14 @@ def database(path, *, create=False):
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > len(migrations):
                 raise ValueError("База создана более новой версией тренажёра")
+            if 0 < version < len(migrations):
+                # The reserved write lock keeps this separate read snapshot consistent.
+                with closing(sqlite3.connect(uri, uri=True)) as source:
+                    snapshot = path.with_name(f"{path.name}.v{version}-{uuid.uuid4().hex}.bak")
+                    with closing(sqlite3.connect(snapshot)) as dest:
+                        source.backup(dest)
+                        if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                            raise ValueError("Ошибка проверки копии перед миграцией")
             for number, script in enumerate(migrations[version:], version + 1):
                 if int(script.stem) != number:
                     raise ValueError("Нарушена нумерация миграций")

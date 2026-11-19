@@ -1,5 +1,11 @@
 """Операции над текущей тренировкой. Вызываются внутри транзакции."""
 import random
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+def moscow_now():
+    return datetime.now(ZoneInfo('Europe/Moscow'))
 
 
 def select_cards(db, learner, limit=10):
@@ -31,14 +37,20 @@ def active_session(db, learner):
     return row[0] if row else None
 
 
-def start(db, learner):
+def start(db, learner, extra=False):
     current = active_session(db, learner)
     if current is not None:
         return current
-    cards = select_cards(db, learner)
+    day = moscow_now().date().isoformat()
+    daily = db.execute("SELECT id FROM sessions WHERE learner=? AND day=? AND kind='daily'", (learner, day)).fetchone()
+    if daily and not extra:
+        return db.execute("SELECT max(id) FROM sessions WHERE learner=? AND day=?", (learner, day)).fetchone()[0]
+    quantity = db.execute('SELECT quantity FROM learners WHERE id=?', (learner,)).fetchone()[0]
+    cards = select_cards(db, learner, quantity)
     if not cards:
         return None
-    session = db.execute("INSERT INTO sessions(learner) VALUES (?)", (learner,)).lastrowid
+    session = db.execute("INSERT INTO sessions(learner,day,kind) VALUES (?,?,?)",
+                         (learner, day, "extra" if daily else "daily")).lastrowid
     db.executemany("INSERT INTO tasks(session,number,card) VALUES (?,?,?)",
                    ((session, i, card) for i, card in enumerate(cards, 1)))
     return session
@@ -49,7 +61,7 @@ def current_task(db, session):
         SELECT t.*, c.hanzi, c.pinyin, c.pos, c.translation, c.lesson,
                (SELECT count(*) FROM tasks WHERE session=t.session) AS total
         FROM tasks t JOIN cards c ON c.id=t.card
-        WHERE session=? AND grade IS NULL ORDER BY number LIMIT 1
+        WHERE session=? AND (grade IS NULL OR phase!='') ORDER BY number LIMIT 1
     """, (session,)).fetchone()
 
 
@@ -59,8 +71,10 @@ def apply_action(db, learner, session, number, action):
     task = current_task(db, session)
     if not task or number != task["number"]:
         return False
+    if task["grade"] is not None:
+        return False
     if action == "show":
-        db.execute("UPDATE tasks SET shown=1 WHERE session=? AND number=?", (session, number))
+        db.execute("UPDATE tasks SET shown=1, translate=coalesce(translate,(SELECT translations FROM learners WHERE id=?)) WHERE session=? AND number=?", (learner, session, number))
         return True
     if not task["shown"] or action not in ("yes", "no", "known"):
         return False
@@ -74,6 +88,11 @@ def apply_action(db, learner, session, number, action):
             known=excluded.known, revision=revision+1
     """, (learner, task["card"], int(not known), int(action == "no"),
           None if known else action, int(known)))
-    if number == task["total"]:
+    if task["translate"]:
+        words = db.execute("SELECT hanzi FROM cards WHERE lesson<=(SELECT lesson FROM learners WHERE id=?)", (learner,))
+        allowed = "".join(sorted(set("".join(row[0] for row in words))))
+        db.execute("UPDATE tasks SET phase='generate',allowed=? WHERE session=? AND number=?", (allowed, session, number))
+        db.execute("INSERT INTO jobs(session,number,kind) VALUES (?,?,'generate')", (session, number))
+    elif number == task["total"]:
         db.execute("UPDATE sessions SET finished=1 WHERE id=?", (session,))
     return True

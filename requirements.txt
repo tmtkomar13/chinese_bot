@@ -1,1 +1,4 @@
 vk-api==11.10.1
+playwright>=1.49,<2
+Pillow>=10.4
+tzdata

@@ -14,6 +14,8 @@ if [[ -e $app || -e $state/trainer.sqlite3 || -e $config ]]; then
     echo "Обнаружена предыдущая установка. Порядок обновления приведён в README.md." >&2
     exit 1
 fi
+apt-get update
+apt-get install -y chromium
 if ! dpkg-query -W -f='${Status}' python3-venv 2>/dev/null | grep -q 'install ok installed'; then
     apt-get update
     apt-get install -y python3 python3-venv
@@ -44,7 +46,12 @@ except Exception as error:
 PY
 )
 printf 'VK_GROUP_ID=%s\nVK_OWNER_ID=%s\nVK_TOKEN=%s\n' "$group" "$number" "$token" > "$stage/config"
-unset token VK_TOKEN
+read -rp "Каталог Yandex AI Studio: " folder
+read -rsp "API-ключ Yandex AI Studio: " ai_key
+printf '\n'
+[[ $folder =~ ^[a-zA-Z0-9_-]+$ && $ai_key =~ ^[a-zA-Z0-9._-]+$ ]]
+printf 'YANDEX_FOLDER_ID=%s\nYANDEX_API_KEY=%s\nCHROMIUM_PATH=/usr/bin/chromium\n' "$folder" "$ai_key" >> "$stage/config"
+unset token VK_TOKEN ai_key
 printf 'Вход разрешён владельцу с числовым ID %s.\n' "$number"
 getent passwd chinese-trainer >/dev/null || useradd --system --user-group --home-dir "$state" --shell /usr/sbin/nologin chinese-trainer
 install -d -m 755 "$app"
@@ -55,7 +62,8 @@ install -d -m 755 "$app/trainer" "$app/trainer/migrations" "$app/data"
 install -m 644 trainer/*.py "$app/trainer/"
 install -m 644 trainer/migrations/*.sql "$app/trainer/migrations/"
 install -m 644 data/vocabulary.tsv "$app/data/"
-chmod -R a+rX "$app/.venv"
+cp -R assets "$app/"
+chmod -R a+rX "$app/assets" "$app/.venv"
 install -d -o chinese-trainer -g chinese-trainer -m 700 "$state"
 install -o chinese-trainer -g chinese-trainer -m 600 data/trainer.sqlite3 "$state/trainer.sqlite3"
 install -m 600 "$stage/config" "$config"

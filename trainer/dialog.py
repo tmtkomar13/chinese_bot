@@ -1,11 +1,15 @@
 """Текст диалога и действия кнопок, независимые от формата сообщений ВК."""
+import json
 import re
+
+from .media import STYLE
+from .training import moscow_now
 
 from .training import active_session, apply_action, current_task, start
 
 
 MENU = [[("Начать тренировку", "start"), ("Открытые уроки", "lessons")],
-        [("Точно знаю", "excluded"), ("Статистика", "stats")]]
+        [("Точно знаю", "excluded"), ("Статистика", "stats")], [("Настройки", "settings")]]
 BACK = [("Меню", "menu")]
 LABELS = {label.casefold(): command for row in MENU for label, command in row}
 
@@ -21,17 +25,44 @@ def exercise(db, session):
     if not card:
         counts = dict(db.execute("SELECT grade,count(*) FROM tasks WHERE session=? GROUP BY grade",
                                  (session,)))
+        info = db.execute("SELECT day,kind FROM sessions WHERE id=?", (session,)).fetchone()
+        today = info["day"] == moscow_now().date().isoformat()
+        next_button = ("Дополнительная тренировка", f"extra {session}") if today else ("Подборка на сегодня", "start")
         return screen(f"Тренировка завершена.\nВспомнил — {counts.get('yes', 0)}"
-                      f"\nНе вспомнил — {counts.get('no', 0)}\nТочно знаю — {counts.get('known', 0)}")
+                      f"\nНе вспомнил — {counts.get('no', 0)}\nТочно знаю — {counts.get('known', 0)}", [[next_button], BACK])
     token = f"{session} {card['number']}"
     title = f"Задание {card['number']} из {card['total']}"
+    phase = card["phase"]
+    skip = ("Пропустить", f"skip {token}")
+    if phase == "result":
+        return screen(card["feedback"], [[("Далее", f"next {token}")], BACK])
+    if phase == "failed":
+        return screen("Не удалось проверить ответ. Ответ сохранён.", [[("Повторить проверку", f"retry {token}"), skip], BACK])
+    if phase in ("generate", "check"):
+        return screen("Готовлю предложение…" if phase == "generate" else "Проверяю перевод…", [[skip], BACK])
+    if phase == "waiting":
+        question = json.loads(card["question"])
+        return screen((card["feedback"] or "Переведите на китайский.") + "\n" + question["ru"],
+                      [[("Показать перевод", f"solution {token}"), skip], BACK])
+    db.execute("""UPDATE tasks SET translate=coalesce(translate,(SELECT translations FROM learners
+                  JOIN sessions ON learners.id=sessions.learner WHERE sessions.id=?)) WHERE session=? AND number=?""",
+               (session, session, card["number"]))
     if not card["shown"]:
         return screen(f"{title}\n{card['translation']}", [[("Показать ответ", f"show {token}")], BACK])
+    media = db.execute("SELECT attachment FROM media WHERE word=? AND style=?", (card["hanzi"], STYLE)).fetchone()
     pos = card["pos"] or "не указана"
-    return screen(f"{title}\n{card['hanzi']} · {card['pinyin']}\n{card['translation']}"
+    reply = screen(f"{title}\n{card['hanzi']} · {card['pinyin']}\n{card['translation']}"
                   f"\nЧасть речи — {pos}\nУрок {card['lesson']}",
                   [[("Вспомнил", f"yes {token}"), ("Не вспомнил", f"no {token}")],
                    [("Точно знаю", f"known {token}")], BACK])
+    if media:
+        reply["attachment"] = media[0]
+    elif not db.execute("SELECT 1 FROM media_retry WHERE word=? AND style=?",
+                        (card["hanzi"], STYLE)).fetchone():
+        reply["text"] += "\nГотовлю GIF. Чтобы увидеть порядок черт, дождитесь вложения перед оценкой."
+    else:
+        reply["text"] += "\nGIF пока недоступен."
+    return reply
 
 
 def excluded(db, learner, page):
@@ -76,12 +107,80 @@ def lessons(db, learner, new=None):
                   "Выбор действует со следующей подборки.", [buttons + BACK])
 
 
+def advance(db, card):
+    key = (card["session"], card["number"])
+    db.execute("DELETE FROM jobs WHERE session=? AND number=?", key)
+    db.execute("UPDATE tasks SET phase='' WHERE session=? AND number=?", key)
+    if card["number"] == card["total"]:
+        db.execute("UPDATE sessions SET finished=1 WHERE id=?", (card["session"],))
+
+
+def settings(db, learner):
+    row = db.execute("SELECT * FROM learners WHERE id=?", (learner,)).fetchone()
+    return screen(f"Слов в день — {row['quantity']}. Напоминание — {row['remind_time']} МСК.\n"
+                  "Введите «слов 10» (от 1 до 100) или «время 19:00».",
+                  [[("Отключить напоминания" if row["reminders"] else "Включить напоминания", f"reminders {1-row['reminders']}")],
+                   [("Отключить переводы" if row["translations"] else "Включить переводы", f"translations {1-row['translations']}")], BACK])
+
+
 def respond(db, learner, text, command=None):
     db.execute("INSERT OR IGNORE INTO learners(id) VALUES (?)", (learner,))
     if command is None:
-        text = text.strip().casefold()
+        original = text.strip()
+        text = original.casefold()
+        if text.startswith(("слов ", "время ")):
+            if match := re.fullmatch(r"слов ([1-9][0-9]?|100)", text):
+                db.execute("UPDATE learners SET quantity=? WHERE id=?", (int(match[1]), learner))
+            elif match := re.fullmatch(r"время ((?:[01][0-9]|2[0-3]):[0-5][0-9])", text):
+                db.execute("UPDATE learners SET remind_time=? WHERE id=?", (match[1], learner))
+            return settings(db, learner)
+        card = current_task(db, active_session(db, learner))
+        if card and card["phase"] == "waiting" and text not in LABELS and not text.startswith("урок "):
+            if not re.search("[㐀-鿿]", original):
+                return exercise(db, card["session"])
+            db.execute("UPDATE tasks SET phase='check', answer=?, tries=tries+1 WHERE session=? AND number=?",
+                       (original, card["session"], card["number"]))
+            db.execute("INSERT INTO translation_attempts VALUES (?,?,?,?,NULL,NULL)",
+                       (card["session"], card["number"], card["tries"] + 1, original))
+            db.execute("INSERT INTO jobs(session,number,kind) VALUES (?,?,'check')", (card["session"], card["number"]))
+            return exercise(db, card["session"])
         match = re.fullmatch(r"урок\s+(\d{1,5})", text)
         command = "lesson " + match[1] if match else LABELS.get(text, "menu")
+    if command == "settings":
+        return settings(db, learner)
+    if match := re.fullmatch(r"(translations|reminders) ([01])", command):
+        column, value = match.groups()
+        db.execute(f"UPDATE learners SET {column}=? WHERE id=?", (int(value), learner))
+        if column == "translations" and value == "0":
+            card = current_task(db, active_session(db, learner))
+            if card:
+                db.execute("UPDATE tasks SET translate=0 WHERE session=? AND number=?", (card["session"], card["number"]))
+                if card["phase"]:
+                    advance(db, card)
+        return settings(db, learner)
+    if match := re.fullmatch(r"extra (\d{1,18})", command):
+        session = db.execute("SELECT id FROM sessions WHERE learner=? AND finished=1 AND day=? ORDER BY id DESC LIMIT 1",
+                             (learner, moscow_now().date().isoformat())).fetchone()
+        return exercise(db, start(db, learner, extra=bool(session and session[0] == int(match[1]))))
+    if match := re.fullmatch(r"(skip|solution|retry|next) (\d{1,18}) (\d{1,3})", command):
+        action, sid, num = match.groups()
+        current = active_session(db, learner)
+        card = current_task(db, current)
+        if card and current == int(sid) and card["number"] == int(num) and card["phase"]:
+            key = (current, int(num))
+            if action == "next" and card["phase"] == "result":
+                advance(db, card)
+            elif action == "skip" and card["phase"] != "result":
+                db.execute("UPDATE tasks SET outcome='skipped' WHERE session=? AND number=?", key)
+                advance(db, card)
+            elif action == "solution" and card["phase"] == "waiting":
+                q = json.loads(card["question"])
+                db.execute("UPDATE tasks SET phase='result',outcome='solution',feedback=? WHERE session=? AND number=?",
+                           ("\n".join(q[k] for k in ("zh","pinyin","explanation")), *key))
+            elif action == "retry" and card["phase"] == "failed":
+                db.execute("UPDATE tasks SET phase='check' WHERE session=? AND number=?", key)
+                db.execute("INSERT INTO jobs(session,number,kind) VALUES (?,?,'check')", key)
+        return exercise(db, current) if current else screen("Эта карточка уже закрыта.")
     if command == "start":
         return exercise(db, start(db, learner))
     card = re.fullmatch(r"(show|yes|no|known) (\d{1,18}) (\d{1,3})", command)
@@ -96,7 +195,10 @@ def respond(db, learner, text, command=None):
             SELECT coalesce(sum(attempts),0), coalesce(sum(errors),0), coalesce(sum(known),0)
             FROM progress WHERE learner=?
         """, (learner,)).fetchone()
-        return screen(f"Попытки — {attempts}\nОшибки — {errors}\nТочно знаю — {known}")
+        done, first, skipped = db.execute("""SELECT count(*) FILTER(WHERE outcome='correct'),
+                count(*) FILTER(WHERE outcome='correct' AND tries=1),count(*) FILTER(WHERE outcome='skipped')
+                FROM tasks JOIN sessions ON session=id WHERE learner=?""", (learner,)).fetchone()
+        return screen(f"Попытки — {attempts}\nОшибки — {errors}\nТочно знаю — {known}\nПереводов выполнено — {done}\nС первой попытки — {first}\nПропущено — {skipped}")
     if command == "lessons":
         return lessons(db, learner)
     if match := re.fullmatch(r"lesson (\d{1,5})", command):

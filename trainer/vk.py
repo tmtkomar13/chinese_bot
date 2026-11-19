@@ -2,7 +2,11 @@ import json
 import logging
 import os
 import time
+import threading
 
+from .worker import enqueue, remind, work
+
+from .training import moscow_now
 from .dialog import respond
 from .storage import transaction
 
@@ -23,8 +27,7 @@ def accept(db, owner, message):
         payload = {}
     command = payload.get("action") if isinstance(payload, dict) else None
     reply = respond(db, owner, message.get("text", ""), command if isinstance(command, str) else None)
-    db.execute("UPDATE vk_messages SET reply=? WHERE id=?",
-               (json.dumps(reply, ensure_ascii=False), inserted.lastrowid))
+    enqueue(db, owner, reply)
 
 
 def keyboard(buttons):
@@ -37,12 +40,37 @@ def keyboard(buttons):
 
 
 def deliver(db, api, owner):
-    for msg in db.execute("SELECT id, peer, reply FROM vk_messages WHERE reply IS NOT NULL AND peer=? ORDER BY id",
+    for msg in db.execute("SELECT id, peer, reply FROM outbox WHERE peer=? ORDER BY id",
                           (owner,)).fetchall():
         reply = json.loads(msg["reply"])
-        api.messages.send(peer_id=msg["peer"], random_id=msg["id"], message=reply["text"],
-                          keyboard=keyboard(reply["buttons"]))
-        db.execute("UPDATE vk_messages SET reply=NULL WHERE id=?", (msg["id"],))
+        if "reminder_day" in reply:
+            day = reply["reminder_day"]
+            due = db.execute("""SELECT reminders FROM learners WHERE id=? AND NOT EXISTS(
+                        SELECT 1 FROM sessions WHERE learner=? AND kind='daily' AND day=? AND finished=1)""",
+                             (owner, owner, day)).fetchone()
+            if day != moscow_now().date().isoformat() or not due or not due[0]:
+                db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+                continue
+        if "task_state" in reply and not db.execute(
+                "SELECT 1 FROM tasks WHERE session=? AND number=? AND phase=? AND tries=? AND (?=0 OR grade IS NULL)",
+                (*reply["task_state"], int(reply.get("requires_ungraded", False)))).fetchone():
+            db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+            continue
+        extra = {"attachment": reply["attachment"]} if reply.get("attachment") else {}
+        try:
+            api.messages.send(peer_id=msg["peer"], random_id=msg["id"], message=reply["text"],
+                              keyboard=keyboard(reply["buttons"]), **extra)
+        except Exception as error:
+            if not extra or getattr(error, "code", None) not in (100, 121, 129, 150):
+                raise
+            invalid = reply.pop("attachment")
+            reply["text"] += "\nGIF недоступен."
+            with transaction(db):
+                db.execute("DELETE FROM media WHERE attachment=?", (invalid,))
+                db.execute("UPDATE outbox SET reply=? WHERE id=?", (json.dumps(reply), msg["id"]))
+            api.messages.send(peer_id=msg["peer"], random_id=msg["id"], message=reply["text"],
+                              keyboard=keyboard(reply["buttons"]))
+        db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
 
 
 def poll_once(db, poll, owner, group):
@@ -55,9 +83,7 @@ def poll_once(db, poll, owner, group):
 
 
 def run(db):
-    import requests
     import vk_api
-    from vk_api.bot_longpoll import VkBotLongPoll
 
     token = os.environ["VK_TOKEN"]
     group, owner = int(os.environ["VK_GROUP_ID"]), int(os.environ["VK_OWNER_ID"])
@@ -65,12 +91,28 @@ def run(db):
         raise ValueError("Проверьте VK_GROUP_ID, VK_OWNER_ID и VK_TOKEN")
     client = vk_api.VkApi(token=token)
     api = client.get_api()
+    stop = threading.Event()
+    path = db.execute("PRAGMA database_list").fetchone()[2]
+    thread = threading.Thread(target=work, args=(path, owner, stop), daemon=True)
+    thread.start()
+    try:
+        listen(db, api, client, owner, group)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
+def listen(db, api, client, owner, group):
+    import requests
+    import vk_api
+    from vk_api.bot_longpoll import VkBotLongPoll
     delay = 1
     while True:
         poll = None
         try:
+            remind(db, owner)
             deliver(db, api, owner)
-            poll = VkBotLongPoll(client, group)
+            poll = VkBotLongPoll(client, group, wait=3)
             saved = db.execute("SELECT ts FROM vk_cursor WHERE community=?", (group,)).fetchone()
             if saved:
                 poll.ts = saved[0]
@@ -79,6 +121,7 @@ def run(db):
             logging.info("Соединение Bots Long Poll установлено")
             while True:
                 poll_once(db, poll, owner, group)
+                remind(db, owner)
                 deliver(db, api, owner)
                 delay = 1
         except (requests.RequestException, vk_api.exceptions.VkApiError) as exc:
