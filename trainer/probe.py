@@ -3,6 +3,7 @@ import json
 import os
 import secrets
 import tempfile
+import argparse
 from pathlib import Path
 
 import vk_api
@@ -38,23 +39,28 @@ def probe_yandex():
     print("Генерация и проверка прошли.", question["ru"])
 
 
-def main():
-    failed = False
-    for name, probe in (("ВК", probe_vk), ("Yandex", probe_yandex)):
+def main(vk_only=False):
+    failures = []
+    checks = [("ВК", probe_vk)]
+    if not vk_only:
+        checks.append(("Yandex", probe_yandex))
+    for name, probe in checks:
         try:
             probe()
         except (Exception, SystemExit) as error:
-            failed = True
-            if isinstance(error, SystemExit) or (name == "ВК" and str(error).startswith("Загрузка GIF:")):
+            failures.append(name)
+            if isinstance(error, SystemExit) or (name == "ВК" and str(error).startswith(("Загрузка GIF:", "Сбой загрузки GIF в ВК ("))):
                 detail = str(error)
             else:
                 status = getattr(getattr(error, "response", None), "status_code", None)
                 detail = f"{type(error).__name__}, код {status or getattr(error, 'code', '—')}"
             print(f"{name} — {detail}", flush=True)
-    if failed:
-        raise SystemExit(1)
+    if failures:
+        raise SystemExit(2 if failures == ["ВК"] else 1)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--vk-only", action="store_true")
+    main(parser.parse_args().vk_only)
 

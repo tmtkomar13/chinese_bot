@@ -6,7 +6,7 @@ import re
 import tempfile
 from pathlib import Path
 
-STYLE = "black-96-v2"
+STYLE = "black-96-slow-v3"
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
 
 
@@ -22,11 +22,13 @@ def render(word, cache):
     data = [json.loads((ASSETS / "characters" / (c + ".json")).read_text(encoding="utf-8"))
             if "\u3400" <= c <= "\u9fff" else None for c in word]
     frames = []
+    durations = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.getenv("CHROMIUM_PATH") or None)
         page = browser.new_page(viewport={"width": 96 * len(word), "height": 96})
         page.set_content('<body style="margin:0;display:flex;background:white"></body>')
-        page.clock.install()
+        page.clock.install(time="2025-01-01T00:00:00Z")
+        page.clock.pause_at("2025-01-01T00:00:01Z")
         page.add_script_tag(path=str(ASSETS / "hanzi-writer.min.js"))
         page.evaluate("""async ([word, data]) => {
             window.writers = Array.from(word, (char, i) => {
@@ -37,15 +39,16 @@ def render(word, cache):
                     return null;
                 }
                 return HanziWriter.create(el, char, {width:96,height:96,padding:5,showCharacter:false,
-                    showOutline:true,strokeAnimationSpeed:2,delayBetweenStrokes:100,charDataLoader:(_, resolve)=>resolve(data[i])});
+                    showOutline:true,strokeAnimationSpeed:1,delayBetweenStrokes:360,charDataLoader:(_, resolve)=>resolve(data[i])});
             });
             await Promise.all(writers.filter(Boolean).map(w => w.getCharacterData()));
         }""", [word, data])
-        def capture():
+        def capture(duration):
             with Image.open(io.BytesIO(page.screenshot())) as shot:
                 frames.append(shot.convert("P", palette=Image.Palette.ADAPTIVE))
+            durations.append(duration)
 
-        capture()
+        capture(500)
         for i, char in enumerate(data):
             if char is None:
                 continue
@@ -55,8 +58,10 @@ def render(word, cache):
             }""", i)
             for _ in range(30 * len(char["strokes"]) + 20):
                 page.clock.run_for(90)
-                capture()
+                # Play each 90 ms of brush movement over 180 ms in the GIF.
+                capture(180)
                 if page.evaluate("window.finished"):
+                    durations[-1] += 800
                     break
             else:
                 raise TimeoutError("Hanzi Writer не завершил анимацию")
@@ -64,7 +69,8 @@ def render(word, cache):
     with tempfile.NamedTemporaryFile(dir=cache, suffix=".gif", delete=False) as tmp:
         temp = Path(tmp.name)
     try:
-        frames[0].save(temp, save_all=True, append_images=frames[1:], duration=[100]*(len(frames)-1)+[900], loop=0)
+        durations[-1] += 1200
+        frames[0].save(temp, save_all=True, append_images=frames[1:], duration=durations, loop=0)
         os.replace(temp, gif)
     finally:
         temp.unlink(missing_ok=True)
@@ -83,7 +89,9 @@ def upload(client, owner, path):
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as error:
-        raise RuntimeError(f"Сбой загрузки GIF в ВК ({type(error).__name__}).") from None
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        info = f", HTTP {status}" if status is not None else ""
+        raise RuntimeError(f"Сбой загрузки GIF в ВК ({type(error).__name__}{info}).") from None
     token = payload.get("file") if isinstance(payload, dict) else None
     if not isinstance(token, str) or not token.strip():
         error = payload.get("error") if isinstance(payload, dict) else None

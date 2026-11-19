@@ -64,8 +64,19 @@ if ! grep -q '^YANDEX_API_KEY=.' "$snapshot/new-environment"; then
     printf 'YANDEX_API_KEY=%s\n' "$api_key" >> "$snapshot/new-environment"
 fi
 grep -q '^CHROMIUM_PATH=' "$snapshot/new-environment" || echo CHROMIUM_PATH=/usr/bin/chromium >> "$snapshot/new-environment"
-systemd-run --wait --pipe --collect -p User=chinese-trainer -p WorkingDirectory="$release" \
-    -p EnvironmentFile="$snapshot/new-environment" "$release/.venv/bin/python" -m trainer.probe
+probe_options=()
+while true; do
+    if systemd-run --wait --pipe --collect -p User=chinese-trainer -p WorkingDirectory="$release" \
+        -p EnvironmentFile="$snapshot/new-environment" "$release/.venv/bin/python" -u -m trainer.probe "${probe_options[@]}"; then
+        break
+    else
+        result=$?
+    fi
+    [[ $result == 2 ]] || exit "$result"
+    read -rp "Проверка ВК не прошла. Enter — повторить только ВК, q — выйти: " decision
+    [[ -z $decision ]] || exit "$result"
+    probe_options=(--vk-only)
+done
 read -rp "Если GIF работает на телефоне и компьютере, введите UPDATE для обновления: " decision
 [[ $decision == UPDATE ]] || exit 0
 systemctl stop chinese-trainer-backup.timer chinese-trainer-backup.service chinese-trainer.service
