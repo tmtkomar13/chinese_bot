@@ -11,7 +11,7 @@ from trainer.ai import generate
 from trainer.dialog import respond
 from trainer.storage import database, import_vocabulary, transaction
 from trainer.worker import prepare_next_gif, process, remind
-from trainer.vk import deliver
+from trainer.vk import accept, deliver, keyboard
 
 ROOT = Path(__file__).resolve().parents[1]
 Q = {"ru":"Я человек.", "zh":"我是人。", "pinyin":"wǒ shì rén", "explanation":"Утверждение."}
@@ -56,7 +56,7 @@ class DailyTest(unittest.TestCase):
         self.db.execute("DELETE FROM cards")
         self.db.executemany("INSERT INTO cards(id,lesson,hanzi,pinyin,translation) VALUES (?,?,?,?,?)",
                             [("a",1,"人人","rénrén","все"), ("b",30,"大人","dàrén","взрослый")])
-        with patch("trainer.worker.media.render", side_effect=lambda word, cache: cache / word) as render, \
+        with patch("trainer.worker.media.render", side_effect=lambda word, cache, speed: cache / word) as render, \
                 patch("trainer.worker.media.upload", side_effect=[ConnectionError(), "doc1_2", "doc1_3", "doc1_4", "doc1_5"]):
             self.assertTrue(prepare_next_gif(self.db, None, 1, self.dir))
             self.assertEqual(self.db.execute("SELECT word FROM media_retry").fetchone()[0], "人人")
@@ -72,6 +72,68 @@ class DailyTest(unittest.TestCase):
         self.assertEqual({row[0] for row in self.db.execute("SELECT word FROM media")}, {"人","大","人人","大人"})
         self.action("start")
         self.assertEqual(self.action("show 1 1")["attachment"], "doc1_5")
+
+    def test_page_link_modes_and_restart(self):
+        self.action("start")
+        self.action("animation off")
+        self.assertNotIn("GIF", self.action("show 1 1")["text"])
+        self.action("animation page")
+        self.action("speed slow")
+        self.conn.close()
+        self.open()
+        with patch.dict("os.environ", STROKES_PAGE_URL=""):
+            self.assertIn("временно недоступна", self.action("start")["text"])
+        with patch.dict("os.environ", STROKES_PAGE_URL="http://192.168.1.10:8765/"):
+            rows = json.loads(keyboard(self.action("start")["buttons"]))["buttons"]
+            link = rows[0][0]["action"]
+            self.assertEqual(link["type"], "open_link")
+            self.assertIn("word=", link["link"])
+            self.assertIn("speed=slow", link["link"])
+
+    def test_pending_gif_rechecks_settings_and_grade(self):
+        self.action("translations 0")
+        self.action("start")
+        self.action("speed fast")
+        self.action("show 1 1")
+        with patch("trainer.worker.media.render") as render, patch("trainer.worker.media.upload", return_value="doc1_2"):
+            prepare_next_gif(self.db, None, 1, self.dir)
+            self.assertEqual(render.call_args.args[-1], "fast")
+            self.assertEqual(self.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 1)
+            self.action("speed slow")
+            api = Mock()
+            deliver(self.db, api, 1)
+            api.messages.send.assert_not_called()
+            self.action("start")
+            prepare_next_gif(self.db, None, 1, self.dir)
+            self.action("animation off")
+            self.action("animation gif")
+            deliver(self.db, api, 1)
+            api.messages.send.assert_not_called()
+            self.action("speed normal")
+            self.action("start")
+            prepare_next_gif(self.db, None, 1, self.dir)
+            self.action("yes 1 1")
+            deliver(self.db, api, 1)
+            api.messages.send.assert_not_called()
+
+    def test_gif_delivery_and_navigation(self):
+        self.action("start")
+        self.action("show 1 1")
+        api = Mock()
+        with patch("trainer.worker.media.render"), patch("trainer.worker.media.upload", return_value="doc1_2"):
+            prepare_next_gif(self.db, None, 1, self.dir)
+            deliver(self.db, api, 1)
+            self.assertEqual(api.messages.send.call_args.kwargs["attachment"], "doc1_2")
+            self.action("speed slow")
+            self.action("start")
+            prepare_next_gif(self.db, None, 1, self.dir)
+            with transaction(self.db):
+                accept(self.db, 1, {"from_id": 1, "peer_id": 1, "conversation_message_id": 10,
+                                    "payload": json.dumps({"action": "settings"})})
+            api.reset_mock()
+            deliver(self.db, api, 1)
+            api.messages.send.assert_called_once()
+            self.assertNotIn("attachment", api.messages.send.call_args.kwargs)
 
     def test_midnight_extra_and_reminders(self):
         self.action("translations 0")

@@ -1,8 +1,10 @@
 """Текст диалога и действия кнопок, независимые от формата сообщений ВК."""
 import json
+import os
 import re
+from urllib.parse import urlencode, urlsplit
 
-from .media import STYLE
+from .media import style_for
 from .training import moscow_now
 
 from .training import active_session, apply_action, current_task, start
@@ -12,6 +14,8 @@ MENU = [[("Начать тренировку", "start"), ("Открытые ур
         [("Точно знаю", "excluded"), ("Статистика", "stats")], [("Настройки", "settings")]]
 BACK = [("Меню", "menu")]
 LABELS = {label.casefold(): command for row in MENU for label, command in row}
+MODES = {"off": "Без анимации", "gif": "GIF в сообщении", "page": "Интерактивная страница"}
+SPEEDS = {"slow": "Медленно", "normal": "Обычно", "fast": "Быстро"}
 
 
 def screen(text, buttons=None):
@@ -49,19 +53,32 @@ def exercise(db, session):
                (session, session, card["number"]))
     if not card["shown"]:
         return screen(f"{title}\n{card['translation']}", [[("Показать ответ", f"show {token}")], BACK])
-    media = db.execute("SELECT attachment FROM media WHERE word=? AND style=?", (card["hanzi"], STYLE)).fetchone()
+    prefs = db.execute("SELECT l.* FROM learners l JOIN sessions s ON s.learner=l.id WHERE s.id=?",
+                       (session,)).fetchone()
     pos = card["pos"] or "не указана"
     reply = screen(f"{title}\n{card['hanzi']} · {card['pinyin']}\n{card['translation']}"
                   f"\nЧасть речи — {pos}\nУрок {card['lesson']}",
                   [[("Вспомнил", f"yes {token}"), ("Не вспомнил", f"no {token}")],
                    [("Точно знаю", f"known {token}")], BACK])
+    if prefs["animation"] == "off":
+        return reply
+    if prefs["animation"] == "page":
+        base = os.getenv("STROKES_PAGE_URL", "").strip()
+        url = urlsplit(base)
+        if url.scheme in ("http", "https") and url.netloc and not url.query and not url.fragment:
+            query = urlencode({"word": card["hanzi"], "speed": prefs["speed"]})
+            reply["buttons"].insert(0, [("Порядок черт", base + "?" + query)])
+        else:
+            reply["text"] += "\nИнтерактивная страница временно недоступна."
+        return reply
+    style = style_for(prefs["speed"])
+    media = db.execute("SELECT attachment FROM media WHERE word=? AND style=?", (card["hanzi"], style)).fetchone()
     if media:
         reply["attachment"] = media[0]
-    elif not db.execute("SELECT 1 FROM media_retry WHERE word=? AND style=?",
-                        (card["hanzi"], STYLE)).fetchone():
-        reply["text"] += "\nГотовлю GIF. Чтобы увидеть порядок черт, дождитесь вложения перед оценкой."
     else:
-        reply["text"] += "\nGIF пока недоступен."
+        db.execute("UPDATE tasks SET gif_request=? WHERE session=? AND number=?",
+                   (prefs["animation_revision"], session, card["number"]))
+        reply["text"] += "\nГотовлю GIF. Можно оценить ответ сейчас."
     return reply
 
 
@@ -120,7 +137,8 @@ def settings(db, learner):
     return screen(f"Слов в день — {row['quantity']}. Напоминание — {row['remind_time']} МСК.\n"
                   "Введите «слов 10» (от 1 до 100) или «время 19:00».",
                   [[("Отключить напоминания" if row["reminders"] else "Включить напоминания", f"reminders {1-row['reminders']}")],
-                   [("Отключить переводы" if row["translations"] else "Включить переводы", f"translations {1-row['translations']}")], BACK])
+                   [("Отключить переводы" if row["translations"] else "Включить переводы", f"translations {1-row['translations']}")],
+                   [("Анимация", "animation")], BACK])
 
 
 def respond(db, learner, text, command=None):
@@ -148,6 +166,15 @@ def respond(db, learner, text, command=None):
         command = "lesson " + match[1] if match else LABELS.get(text, "menu")
     if command == "settings":
         return settings(db, learner)
+    if command == "animation" or re.fullmatch(r"(animation (off|gif|page)|speed (slow|normal|fast))", command):
+        if " " in command:
+            column, value = command.split()
+            db.execute(f"UPDATE learners SET {column}=?, animation_revision=animation_revision+1 WHERE id=? AND {column}!=?",
+                       (value, learner, value))
+        row = db.execute("SELECT animation,speed FROM learners WHERE id=?", (learner,)).fetchone()
+        return screen(f"Режим — {MODES[row['animation']]}. Скорость — {SPEEDS[row['speed']]}.",
+                      [[(label, "animation " + key)] for key, label in MODES.items()] +
+                      [[(label, "speed " + key) for key, label in SPEEDS.items()], [("Настройки", "settings")]])
     if match := re.fullmatch(r"(translations|reminders) ([01])", command):
         column, value = match.groups()
         db.execute(f"UPDATE learners SET {column}=? WHERE id=?", (int(value), learner))

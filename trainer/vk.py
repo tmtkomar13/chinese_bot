@@ -26,6 +26,10 @@ def accept(db, owner, message):
     except (ValueError, TypeError):
         payload = {}
     command = payload.get("action") if isinstance(payload, dict) else None
+    # A new screen supersedes the pending attachment. Showing the answer
+    # again registers a fresh request if that version is still rendering.
+    db.execute("""UPDATE tasks SET gif_request=NULL WHERE gif_request IS NOT NULL
+                  AND session IN (SELECT id FROM sessions WHERE learner=? AND finished=0)""", (owner,))
     reply = respond(db, owner, message.get("text", ""), command if isinstance(command, str) else None)
     enqueue(db, owner, reply)
 
@@ -33,7 +37,9 @@ def accept(db, owner, message):
 def keyboard(buttons):
     rows = []
     for row in buttons:
-        rows.append([{"action": {"type": "text", "label": label,
+        rows.append([{"action": {"type": "open_link", "label": label, "link": command}}
+                     if command.startswith(("https://", "http://")) else
+                     {"action": {"type": "text", "label": label,
                                  "payload": json.dumps({"action": command})},
                       "color": "secondary"} for label, command in row])
     return json.dumps({"one_time": False, "buttons": rows}, ensure_ascii=False)
@@ -43,6 +49,14 @@ def deliver(db, api, owner):
     for msg in db.execute("SELECT id, peer, reply FROM outbox WHERE peer=? ORDER BY id",
                           (owner,)).fetchall():
         reply = json.loads(msg["reply"])
+        if "gif_revision" in reply and not db.execute(
+                """SELECT 1 FROM learners l JOIN sessions s ON s.learner=l.id
+                   JOIN tasks t ON t.session=s.id WHERE l.id=? AND animation='gif'
+                   AND animation_revision=? AND t.gif_request=animation_revision
+                   AND s.finished=0 AND s.id=? AND t.number=?""",
+                (owner, reply["gif_revision"], *reply["task_state"][:2])).fetchone():
+            db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+            continue
         if "reminder_day" in reply:
             day = reply["reminder_day"]
             due = db.execute("""SELECT reminders FROM learners WHERE id=? AND NOT EXISTS(

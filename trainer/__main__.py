@@ -12,6 +12,7 @@ def main():
     sub.add_parser("import").add_argument("tsv")
     sub.add_parser("backup").add_argument("directory")
     sub.add_parser("check")
+    sub.add_parser("gif-status")
     sub.add_parser("run")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -20,6 +21,9 @@ def main():
             print("Импортировано карточек:", import_vocabulary(db, args.tsv))
         elif args.command == "backup":
             print(backup(db, args.directory))
+        elif args.command == "gif-status":
+            from .worker import gif_status
+            gif_status(db)
         elif args.command == "check":
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchone():
                 raise SystemExit("Ошибка проверки SQLite")

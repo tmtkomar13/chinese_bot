@@ -77,16 +77,31 @@ def process(db, owner):
     return True
 
 
-def prepare_next_gif(db, client, owner, cache):
-    # Include both complete spellings and each Han character in a compound.
-    item = db.execute("""
+VOCABULARY = """
         WITH RECURSIVE letters(word,lesson,pos) AS (
             SELECT hanzi,lesson,1 FROM cards
             UNION ALL SELECT word,lesson,pos+1 FROM letters WHERE pos<length(word)
         ), vocabulary(word,lesson,part) AS (
             SELECT hanzi,lesson,0 FROM cards UNION ALL
             SELECT substr(word,pos,1),lesson,1 FROM letters WHERE substr(word,pos,1) BETWEEN '㐀' AND '鿿'
-        ), upcoming AS (
+        )
+"""
+
+
+def gif_status(db):
+    for speed in ("normal", "slow", "fast"):
+        ready, total, retry = db.execute(VOCABULARY + """
+            SELECT count(m.word),count(*),count(r.word)
+            FROM (SELECT DISTINCT word FROM vocabulary) v
+            LEFT JOIN media m ON m.word=v.word AND m.style=?
+            LEFT JOIN media_retry r ON r.word=v.word AND r.style=? AND m.word IS NULL
+        """, (media.style_for(speed), media.style_for(speed))).fetchone()
+        print(f"{speed}: загружено в ВК {ready}/{total}, ожидают повтора после ошибки {retry}")
+
+
+def next_vocabulary_gif(db, owner, speed):
+    return db.execute(VOCABULARY + """
+        , upcoming AS (
             SELECT c.hanzi,min(t.number) AS priority FROM tasks t
             JOIN sessions s ON s.id=t.session JOIN cards c ON c.id=t.card
             WHERE s.learner=? AND s.finished=0 AND t.grade IS NULL GROUP BY c.hanzi
@@ -97,29 +112,57 @@ def prepare_next_gif(db, client, owner, cache):
         LEFT JOIN media_retry r ON r.word=v.word AND r.style=?
         WHERE m.word IS NULL AND coalesce(r.retry_at,0)<=?
         GROUP BY v.word ORDER BY u.priority IS NULL,u.priority,min(v.part),min(v.lesson),v.word LIMIT 1
-    """, (owner, media.STYLE, media.STYLE, int(time.time()))).fetchone()
-    if not item:
+    """, (owner, media.style_for(speed), media.style_for(speed), int(time.time()))).fetchone()
+
+
+def prepare_next_gif(db, client, owner, cache):
+    session = active_session(db, owner)
+    card = current_task(db, session) if session else None
+    prefs = db.execute("SELECT animation,speed,animation_revision FROM learners WHERE id=?", (owner,)).fetchone()
+    speed = "normal"
+    item = None
+    if (card and card["shown"] and card["grade"] is None and prefs["animation"] == "gif"
+            and card["gif_request"] == prefs["animation_revision"]):
+        key = (card["hanzi"], media.style_for(prefs["speed"]))
+        item = db.execute("""SELECT ? AS word,coalesce(r.failures,0) AS failures
+            FROM (SELECT 1) LEFT JOIN media_retry r ON r.word=? AND r.style=?
+            WHERE coalesce(r.retry_at,0)<=? AND NOT EXISTS(SELECT 1 FROM media WHERE word=? AND style=?)""",
+                          (key[0], *key, int(time.time()), *key)).fetchone()
+        if item:
+            speed = prefs["speed"]
+    if item is None:
+        speeds = ("normal", "slow", "fast") if os.getenv("GIF_PREPARE_SPEEDS") == "all" else ("normal",)
+        for speed in speeds:
+            item = next_vocabulary_gif(db, owner, speed)
+            if item is not None:
+                break
+    if item is None:
         return False
     word = item["word"]
+    style = media.style_for(speed)
     try:
-        path = media.render(word, cache)
+        path = media.render(word, cache, speed)
         attachment = media.upload(client, owner, path)
     except Exception as error:
         failures = item["failures"] + 1
         delay = min(3600, 30 * 2 ** min(failures - 1, 7))
         db.execute("INSERT OR REPLACE INTO media_retry VALUES (?,?,?,?)",
-                   (word, media.STYLE, failures, int(time.time()) + delay))
+                   (word, style, failures, int(time.time()) + delay))
         logging.warning("GIF %s: %s, повтор через %d с", word, type(error).__name__, delay)
         return True
     with transaction(db):
-        db.execute("INSERT OR REPLACE INTO media VALUES (?,?,?)", (word, media.STYLE, attachment))
-        db.execute("DELETE FROM media_retry WHERE word=? AND style=?", (word, media.STYLE))
+        db.execute("INSERT OR REPLACE INTO media VALUES (?,?,?)", (word, style, attachment))
+        db.execute("DELETE FROM media_retry WHERE word=? AND style=?", (word, style))
         session = active_session(db, owner)
         card = current_task(db, session) if session else None
-        if card and card["shown"] and card["grade"] is None and card["hanzi"] == word:
+        prefs = db.execute("SELECT animation,speed,animation_revision FROM learners WHERE id=?", (owner,)).fetchone()
+        if (card and card["shown"] and card["grade"] is None and card["hanzi"] == word
+                and prefs["animation"] == "gif" and prefs["speed"] == speed
+                and card["gif_request"] == prefs["animation_revision"]):
             reply = exercise(db, session)
             reply["task_state"] = [session, card["number"], "", card["tries"]]
             reply["requires_ungraded"] = True
+            reply["gif_revision"] = prefs["animation_revision"]
             enqueue(db, owner, reply)
     return True
 

@@ -1,0 +1,5 @@
+{
+  "slow": {"strokeAnimationSpeed": 0.32, "delayBetweenStrokes": 1050},
+  "normal": {"strokeAnimationSpeed": 0.46, "delayBetweenStrokes": 800},
+  "fast": {"strokeAnimationSpeed": 0.95, "delayBetweenStrokes": 350}
+}
