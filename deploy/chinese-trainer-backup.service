@@ -1,0 +1,17 @@
+[Unit]
+Description=Back up the Chinese trainer SQLite database
+
+[Service]
+Type=oneshot
+User=chinese-trainer
+Group=chinese-trainer
+WorkingDirectory=/opt/chinese-trainer
+StateDirectory=chinese-trainer
+StateDirectoryMode=0700
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/chinese-trainer/.venv/bin/python -m trainer --db /var/lib/chinese-trainer/trainer.sqlite3 backup /var/lib/chinese-trainer/backups
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+UMask=0077

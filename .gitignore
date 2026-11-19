@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+tmp/
+*.env
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.pdf
+*.sqlite3
+!data/trainer.sqlite3
+backups/

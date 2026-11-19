@@ -1,0 +1,25 @@
+[Unit]
+Description=Chinese vocabulary trainer for VK
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=chinese-trainer
+Group=chinese-trainer
+WorkingDirectory=/opt/chinese-trainer
+EnvironmentFile=/etc/chinese-trainer.env
+Environment=TRAINER_DB=/var/lib/chinese-trainer/trainer.sqlite3
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=chinese-trainer
+StateDirectoryMode=0700
+ExecStart=/opt/chinese-trainer/.venv/bin/python -m trainer run
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
