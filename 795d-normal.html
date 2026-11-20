@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru" data-chars="795d" data-speed="normal">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Порядок черт · Тренажёр китайского</title>
+<link rel="stylesheet" href="practice.css">
+<main>
+  <h1 id="word">Порядок черт</h1>
+  <p id="notice" role="status">Загружаю данные черт…</p>
+  <section aria-label="Показ порядка черт">
+    <div id="preview"></div>
+    <button id="replay" disabled>Повторить показ</button>
+  </section>
+  <section aria-labelledby="practice-title">
+    <h2 id="practice-title">Пропись</h2>
+    <label>Повторов слова по памяти <select id="count"></select></label>
+    <p><button id="start" disabled>Начать пропись</button></p>
+    <p id="stage" role="status"></p>
+    <div id="cell" hidden></div>
+  </section>
+  <footer>Оцените ответ в карточке ВК.</footer>
+</main>
+<script src="hanzi-writer.min.js"></script>
+<script src="practice.js"></script>
+</html>
