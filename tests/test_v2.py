@@ -257,6 +257,23 @@ class DailyTest(unittest.TestCase):
         self.assertIn("завершена", self.action("start")["text"])
         self.assertIsNone(self.db.execute("SELECT 1 FROM jobs WHERE kind='generate'").fetchone())
 
+    def test_difficulty_applies_when_generation_is_queued(self):
+        self.assertIn("Лёгкий", str(self.action("settings")["buttons"]))
+        levels = dict(self.action("difficulty")["buttons"][0])
+        self.action(levels["Сложный"])
+        self.db.execute("DELETE FROM cards")
+        self.db.execute("INSERT INTO cards(id,lesson,hanzi,pinyin,translation) VALUES ('target',1,'人','rén','человек')")
+        self.grade()
+        self.action(levels["Средний"])
+        self.conn.close()
+        self.open()
+        self.assertIn("Средний", str(self.action("settings")["buttons"]))
+        question = dict(Q, zh="人？", ru="Человек?")
+        with patch("trainer.ai.ask", return_value=question) as ask:
+            self.job()
+        self.assertIn("выразительную фразу", ask.call_args.args[0])
+        self.assertIn(question["ru"], self.action("start")["text"])
+
     def test_allowed_characters(self):
         task = {"hanzi":"人", "translation":"человек", "allowed":"我是人"}
         invalid = dict(Q, zh="我是超人。")

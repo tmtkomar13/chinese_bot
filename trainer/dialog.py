@@ -17,6 +17,7 @@ BACK = [("Меню", "menu")]
 LABELS = {label.casefold(): command for row in MENU for label, command in row}
 MODES = {"off": "Без анимации", "gif": "GIF в сообщении", "page": "Интерактивная страница"}
 SPEEDS = {"slow": "Медленно", "normal": "Обычно", "fast": "Быстро"}
+DIFFICULTIES = {"easy": "Лёгкий", "medium": "Средний", "hard": "Сложный"}
 
 
 def screen(text, buttons=None):
@@ -149,6 +150,7 @@ def settings(db, learner):
                   "Введите «слов 10» (от 1 до 100) или «время 19:00».",
                   [[("Отключить напоминания" if row["reminders"] else "Включить напоминания", f"reminders {1-row['reminders']}")],
                    [("Отключить переводы" if row["translations"] else "Включить переводы", f"translations {1-row['translations']}")],
+                   [(f"Сложность переводов · {DIFFICULTIES[row['difficulty']]}", "difficulty")],
                    [("Анимация", "animation")], BACK])
 
 
@@ -176,6 +178,16 @@ def respond(db, learner, text, command=None):
         match = re.fullmatch(r"урок\s+(\d{1,5})", text)
         command = "lesson " + match[1] if match else LABELS.get(text, "menu")
     if command == "settings":
+        return settings(db, learner)
+    if command == "difficulty":
+        return screen("Выберите уровень для следующих предложений.\n\n"
+                      "Лёгкий — простые фразы вроде «Я учитель».\n"
+                      "Средний — повседневные ситуации с деталями, например «По дороге домой я купил три яблока».\n"
+                      "Сложный — образные фразы, где важно передать оттенок смысла, например «Дождь стих, и город словно выдохнул».",
+                      [[(label, f"difficulty {key}") for key, label in DIFFICULTIES.items()],
+                       [("Настройки", "settings")]])
+    if command.startswith("difficulty ") and command.split(" ", 1)[1] in DIFFICULTIES:
+        db.execute("UPDATE learners SET difficulty=? WHERE id=?", (command.split(" ", 1)[1], learner))
         return settings(db, learner)
     if command == "animation" or re.fullmatch(r"(animation (off|gif|page)|speed (slow|normal|fast))", command):
         if " " in command:

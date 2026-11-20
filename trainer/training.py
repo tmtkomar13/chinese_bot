@@ -91,7 +91,9 @@ def apply_action(db, learner, session, number, action):
     if task["translate"]:
         words = db.execute("SELECT hanzi FROM cards WHERE lesson<=(SELECT lesson FROM learners WHERE id=?)", (learner,))
         allowed = "".join(sorted(set("".join(row[0] for row in words))))
-        db.execute("UPDATE tasks SET phase='generate',allowed=? WHERE session=? AND number=?", (allowed, session, number))
+        db.execute("""UPDATE tasks SET phase='generate', allowed=?,
+                      difficulty=(SELECT difficulty FROM learners WHERE id=?)
+                      WHERE session=? AND number=?""", (allowed, learner, session, number))
         db.execute("INSERT INTO jobs(session,number,kind) VALUES (?,?,'generate')", (session, number))
     elif number == task["total"]:
         db.execute("UPDATE sessions SET finished=1 WHERE id=?", (session,))
