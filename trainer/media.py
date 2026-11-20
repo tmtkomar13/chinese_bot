@@ -88,6 +88,10 @@ def render(word, cache, speed="normal"):
     return gif
 
 
+class UploadError(RuntimeError):
+    """Upload diagnostics safe to write to the service log."""
+
+
 def upload(client, owner, path):
     import requests
 
@@ -95,14 +99,14 @@ def upload(client, owner, path):
     server = docs.getMessagesUploadServer(peer_id=owner, type="doc")
     try:
         with path.open("rb") as source:
-            response = requests.post(server["upload_url"], timeout=30,
+            response = requests.post(server["upload_url"], timeout=(15, 120),
                                      files={"file": ("strokes.gif", source, "image/gif")})
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as error:
         status = getattr(getattr(error, "response", None), "status_code", None)
         info = f", HTTP {status}" if status is not None else ""
-        raise RuntimeError(f"Сбой загрузки GIF в ВК ({type(error).__name__}{info}).") from None
+        raise UploadError(f"Сбой загрузки GIF в ВК ({type(error).__name__}{info}).") from None
     token = payload.get("file") if isinstance(payload, dict) else None
     if not isinstance(token, str) or not token.strip():
         error = payload.get("error") if isinstance(payload, dict) else None
@@ -115,7 +119,7 @@ def upload(client, owner, path):
                   re.fullmatch(r"(?:-?\d{1,8}|[a-zA-Z]{1,16}(?:_[a-zA-Z0-9]{1,16}){1,5})", str(code))]
         fields = ", ".join(k for k in ("file", "error", "error_code", "error_descr", "response")
                            if isinstance(payload, dict) and k in payload)
-        raise ValueError(f"Загрузка GIF: HTTP {response.status_code}, код ВК: {', '.join(dict.fromkeys(labels)) or 'не указан'}, "
+        raise UploadError(f"Загрузка GIF: HTTP {response.status_code}, код ВК: {', '.join(dict.fromkeys(labels)) or 'не указан'}, "
                          f"поля ответа: {fields or 'нераспознанные'}, размер: {path.stat().st_size} байт.")
     saved = docs.save(file=token, title="strokes.gif")
     doc = saved["doc"]

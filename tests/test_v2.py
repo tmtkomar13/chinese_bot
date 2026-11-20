@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from trainer.ai import generate
 from trainer.dialog import respond
+from trainer.media import style_for
 from trainer.storage import database, import_vocabulary, transaction
 from trainer.worker import prepare_next_gif, process, remind
 from trainer.vk import accept, deliver, keyboard
@@ -134,6 +135,29 @@ class DailyTest(unittest.TestCase):
             deliver(self.db, api, 1)
             api.messages.send.assert_called_once()
             self.assertNotIn("attachment", api.messages.send.call_args.kwargs)
+
+    def test_rejected_cached_gif_reuploaded_for_open_card(self):
+        self.action("start")
+        word = self.db.execute("SELECT hanzi FROM cards JOIN tasks ON card=id").fetchone()[0]
+        self.db.execute("INSERT INTO media VALUES (?,?,?)", (word, style_for("normal"), "doc1_1"))
+        with transaction(self.db):
+            accept(self.db, 1, {"from_id": 1, "peer_id": 1, "conversation_message_id": 1,
+                                "payload": json.dumps({"action": "show 1 1"})})
+        api = Mock()
+        invalid = RuntimeError()
+        invalid.code = 100
+        api.messages.send.side_effect = [101, invalid, 102]
+        deliver(self.db, api, 1)
+        card, cached = api.messages.send.call_args_list
+        self.assertIn("keyboard", card.kwargs)
+        self.assertNotIn("attachment", card.kwargs)
+        self.assertNotIn("keyboard", cached.kwargs)
+        self.assertEqual(cached.kwargs["attachment"], "doc1_1")
+        with patch("trainer.worker.media.render"), patch("trainer.worker.media.upload", return_value="doc1_2"):
+            prepare_next_gif(self.db, None, 1, self.dir)
+        deliver(self.db, api, 1)
+        self.assertEqual(api.messages.send.call_args.kwargs["attachment"], "doc1_2")
+        self.assertNotIn("keyboard", api.messages.send.call_args.kwargs)
 
     def test_midnight_extra_and_reminders(self):
         self.action("translations 0")

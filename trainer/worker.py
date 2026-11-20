@@ -140,15 +140,22 @@ def prepare_next_gif(db, client, owner, cache):
         return False
     word = item["word"]
     style = media.style_for(speed)
+    stage = "отрисовка"
     try:
         path = media.render(word, cache, speed)
+        stage = "загрузка в ВК"
         attachment = media.upload(client, owner, path)
     except Exception as error:
         failures = item["failures"] + 1
         delay = min(3600, 30 * 2 ** min(failures - 1, 7))
         db.execute("INSERT OR REPLACE INTO media_retry VALUES (?,?,?,?)",
                    (word, style, failures, int(time.time()) + delay))
-        logging.warning("GIF %s: %s, повтор через %d с", word, type(error).__name__, delay)
+        detail = type(error).__name__
+        if isinstance(error, media.UploadError):
+            detail = str(error)
+        elif isinstance(getattr(error, "code", None), int):
+            detail += f", код {error.code}"
+        logging.warning("GIF %s (%s), %s: %s, повтор через %d с", word, speed, stage, detail, delay)
         return True
     with transaction(db):
         db.execute("INSERT OR REPLACE INTO media VALUES (?,?,?)", (word, style, attachment))
@@ -160,9 +167,7 @@ def prepare_next_gif(db, client, owner, cache):
                 and prefs["animation"] == "gif" and prefs["speed"] == speed
                 and card["gif_request"] == prefs["animation_revision"]):
             reply = exercise(db, session)
-            reply["task_state"] = [session, card["number"], "", card["tries"]]
-            reply["requires_ungraded"] = True
-            reply["gif_revision"] = prefs["animation_revision"]
+            reply.update(text="Порядок черт", gif_only=True, fresh_upload=True)
             enqueue(db, owner, reply)
     return True
 

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import time
 from urllib.parse import urlencode, urlsplit
 
 from .media import style_for
@@ -73,12 +74,22 @@ def exercise(db, session):
         return reply
     style = style_for(prefs["speed"])
     media = db.execute("SELECT attachment FROM media WHERE word=? AND style=?", (card["hanzi"], style)).fetchone()
+    db.execute("UPDATE tasks SET gif_request=? WHERE session=? AND number=?",
+               (prefs["animation_revision"], session, card["number"]))
     if media:
         reply["attachment"] = media[0]
+        reply["gif_revision"] = prefs["animation_revision"]
+        reply["task_state"] = [session, card["number"], "", card["tries"]]
+        reply["requires_ungraded"] = True
     else:
-        db.execute("UPDATE tasks SET gif_request=? WHERE session=? AND number=?",
-                   (prefs["animation_revision"], session, card["number"]))
-        reply["text"] += "\nГотовлю GIF. Можно оценить ответ сейчас."
+        retry = db.execute("SELECT retry_at FROM media_retry WHERE word=? AND style=?",
+                           (card["hanzi"], style)).fetchone()
+        if retry:
+            db.execute("UPDATE media_retry SET retry_at=min(retry_at,?) WHERE word=? AND style=?",
+                       (int(time.time()) + 5, card["hanzi"], style))
+            reply["text"] += "\nПредыдущая попытка подготовить GIF не удалась. Повторю для этой карточки."
+        else:
+            reply["text"] += "\nГотовлю GIF. Можно оценить ответ сейчас."
     return reply
 
 
