@@ -9,9 +9,10 @@ from unittest.mock import Mock, patch
 
 from requests.exceptions import ReadTimeout
 
+from trainer.dialog import respond
 from trainer.search import PAGE_SIZE, pinyin_matches, pos_label, search_cards
 from trainer.search_dialog import handle_search, search_is_open
-from trainer.storage import database, import_vocabulary
+from trainer.storage import database, import_vocabulary, transaction
 from trainer.topics import REQUEST_TIMEOUT, RETRY_DELAY, print_topic_status, process_topic_batch, topic_progress
 
 
@@ -84,6 +85,25 @@ class DictionaryTest(unittest.TestCase):
             self.assertFalse(search_is_open(db, LEARNER))
             self.assertIn("Страница 2", handle_search(db, LEARNER, "", "search")["text"])
             self.assertIn("Фильтры не выбраны", handle_search(db, LEARNER, "", "search reset")["text"])
+
+    def test_typed_menu_preserves_filter_draft_and_results_page(self):
+        with database(self.path) as db, transaction(db):
+            menu = respond(db, LEARNER, "", "menu")
+            respond(db, LEARNER, "Поиск")
+            respond(db, LEARNER, "", "search filter lesson")
+            respond(db, LEARNER, "23")
+            respond(db, LEARNER, "", "search page 1")
+            draft = respond(db, LEARNER, "", "search filter translation")
+            self.assertEqual(respond(db, LEARNER, " МЕНЮ "), menu)
+            self.assertFalse(search_is_open(db, LEARNER))
+        with database(self.path) as db, transaction(db):
+            self.assertEqual(respond(db, LEARNER, "Поиск"), draft)
+            self.assertEqual(db.execute("SELECT page FROM search_states WHERE learner=?",
+                                        (LEARNER,)).fetchone()[0], 1)
+            results = respond(db, LEARNER, "смотреть")
+            self.assertIn("Урок — 23, Перевод — смотреть", results["text"])
+            self.assertIn("看", results["text"])
+
 
 class TopicTest(unittest.TestCase):
     def setUp(self):

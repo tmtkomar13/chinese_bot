@@ -124,6 +124,23 @@ class ReviewTest(unittest.TestCase):
         self.action("review at 23 selected")
         self.assertEqual(self.cards(1), [self.lesson23[0], self.lesson23[5]])
 
+    def test_review_keeps_open_lessons_beyond_the_reviewed_lesson(self):
+        self.action("translations 1")
+        self.action(text="урок 13")
+        self.action("review lesson 2")
+        self.action("review at 2 manual")
+        self.action("review at 2 toggle B02-01")
+        self.action("review at 2 selected")
+        self.action(text="урок 1")
+        self.connection.close()
+        self.db = self.connection.enter_context(database(self.path))
+        self.assertIn("同学", self.action("show 1 1")["text"])
+        self.action("yes 1 1")
+        self.assertEqual(tuple(self.db.execute("SELECT lesson,lesson_limit FROM sessions").fetchone()), (2, 13))
+        allowed = self.db.execute("SELECT allowed FROM tasks").fetchone()[0]
+        self.assertTrue(set("同学借").issubset(allowed))
+        self.assertNotIn("葡", allowed)
+
     def test_translation_finishes_while_search_open(self):
         self.action("translations 1")
         self.action("review lesson 1")

@@ -61,6 +61,47 @@ def is_current_gif(db, owner, reply):
     return any(row["style"] == style_for(row["speed"]) for row in matches)
 
 
+def _deliver_reply(db, api, msg, reply):
+    while True:
+        attachment = reply.get("attachment")
+        extra = {"attachment": attachment} if attachment else {}
+        if "buttons" in reply and not (reply.get("gif_only") or reply.get("omit_keyboard")):
+            extra["keyboard"] = keyboard(reply["buttons"])
+        try:
+            api.messages.send(peer_id=msg["peer"], random_id=msg["id"], message=reply["text"],
+                              **extra)
+            if attachment:
+                logging.info("ВК принял GIF для карточки %s", reply.get("task_state", [])[:2])
+            break
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if attachment and code in (100, 121, 129, 150):
+                logging.warning("ВК отклонил вложение карточки: код %s", code)
+                with transaction(db):
+                    db.execute("DELETE FROM media WHERE attachment=?", (attachment,))
+                    if reply.get("gif_only") and not reply.get("fresh_upload"):
+                        # The open card still requests this version. Let the worker upload it again.
+                        db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+                        return
+                    if reply.get("fresh_upload"):
+                        db.execute("UPDATE tasks SET gif_request=NULL WHERE session=? AND number=?",
+                                   reply["task_state"][:2])
+                    reply.pop("attachment")
+                    reply.pop("gif_revision", None)
+                    reply.pop("gif_only", None)
+                    reply["text"] += "\nGIF недоступен."
+                    db.execute("UPDATE outbox SET reply=? WHERE id=?", (json.dumps(reply), msg["id"]))
+            elif not attachment and code == 100:
+                if "keyboard" not in extra:
+                    logging.warning("ВК отклонил текст сообщения outbox %s: код %s", msg["id"], code)
+                    break
+                reply["omit_keyboard"] = True
+                db.execute("UPDATE outbox SET reply=? WHERE id=?", (json.dumps(reply), msg["id"]))
+            else:
+                raise
+    db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+
+
 def deliver(db, api, owner):
     for msg in db.execute("SELECT id, peer, reply FROM outbox WHERE peer=? ORDER BY id",
                           (owner,)).fetchall():
@@ -90,34 +131,7 @@ def deliver(db, api, owner):
                 (*reply["task_state"], int(reply.get("requires_ungraded", False)))).fetchone():
             db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
             continue
-        extra = {"attachment": reply["attachment"]} if reply.get("attachment") else {}
-        if not reply.get("gif_only"):
-            extra["keyboard"] = keyboard(reply["buttons"])
-        try:
-            api.messages.send(peer_id=msg["peer"], random_id=msg["id"], message=reply["text"],
-                              **extra)
-            if extra.get("attachment"):
-                logging.info("ВК принял GIF для карточки %s", reply.get("task_state", [])[:2])
-        except Exception as error:
-            if not reply.get("attachment") or getattr(error, "code", None) not in (100, 121, 129, 150):
-                raise
-            invalid = reply.pop("attachment")
-            logging.warning("ВК отклонил вложение карточки: код %s", error.code)
-            with transaction(db):
-                db.execute("DELETE FROM media WHERE attachment=?", (invalid,))
-                if reply.get("gif_only") and not reply.get("fresh_upload"):
-                    # The open card still requests this version. Let the worker upload it again.
-                    db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
-                    continue
-                if reply.get("fresh_upload"):
-                    db.execute("UPDATE tasks SET gif_request=NULL WHERE session=? AND number=?",
-                               reply["task_state"][:2])
-                    reply.pop("gif_revision", None)
-                reply["text"] += "\nGIF недоступен."
-                db.execute("UPDATE outbox SET reply=? WHERE id=?", (json.dumps(reply), msg["id"]))
-            api.messages.send(peer_id=msg["peer"], random_id=msg["id"], message=reply["text"],
-                              keyboard=keyboard(reply["buttons"]))
-        db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+        _deliver_reply(db, api, msg, reply)
 
 
 def poll_once(db, poll, owner, group):

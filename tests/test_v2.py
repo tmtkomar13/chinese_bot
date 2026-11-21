@@ -302,6 +302,31 @@ class DailyTest(unittest.TestCase):
         self.assertTrue(valid_question(dict(Q, zh="我爱卡拉OK。"), mixed))
         self.assertFalse(valid_question(dict(Q, zh="我爱卡拉OK OK。"), mixed))
 
+    def test_lesson_limit_survives_changes_and_restart(self):
+        self.db.execute("DELETE FROM cards")
+        self.db.executemany("INSERT INTO cards(id,lesson,hanzi,pinyin,translation) VALUES (?,?,?,?,?)",
+                            [("early", 1, "人", "rén", "человек"),
+                             ("later", 2, "同学", "tóngxué", "одноклассник")])
+        self.say("урок 1")
+        self.action("start")
+        self.say("урок 2")
+        self.conn.close()
+        self.open()
+        self.assertIn("человек", self.action("resume")["text"])
+        self.action("show 1 1")
+        self.action("known 1 1")
+        self.assertEqual(self.db.execute("SELECT allowed FROM tasks WHERE session=1").fetchone()[0], "人")
+
+        self.action("skip 1 1")
+        self.assertIn("одноклассник", self.action("extra 1")["text"])
+        self.say("урок 1")
+        self.action("show 2 1")
+        self.action("yes 2 1")
+        self.assertEqual(set(self.db.execute("SELECT allowed FROM tasks WHERE session=2").fetchone()[0]),
+                         set("人同学"))
+        self.assertEqual(list(map(tuple, self.db.execute("SELECT kind,lesson_limit FROM sessions ORDER BY id"))),
+                         [("daily", 1), ("extra", 2)])
+
     def test_generation_accepts_requested_level_and_checks_translation(self):
         examples = {
             "easy": Q,

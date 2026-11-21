@@ -134,7 +134,8 @@ def handle_search(db, learner, text, command=None):
     state = db.execute("SELECT * FROM search_states WHERE learner=?", (learner,)).fetchone()
     opened = bool(state and state["is_open"])
     text = unicodedata.normalize("NFC", text.strip())
-    if command == "search" or (not opened and command is None and text.casefold() == "поиск"):
+    typed = text.casefold() if command is None else None
+    if command == "search" or (not opened and typed == "поиск"):
         db.execute("""
             INSERT INTO search_states(learner,is_open) VALUES (?,1)
             ON CONFLICT(learner) DO UPDATE SET is_open=1
@@ -145,7 +146,7 @@ def handle_search(db, learner, text, command=None):
         return result_screen(db, learner, filters, state["page"] if state else 0)
     if not opened:
         return None
-    if command in ("menu", "start", "resume") or (command is None and text.casefold() == "продолжить тренировку"):
+    if command in ("menu", "start", "resume") or typed in ("меню", "продолжить тренировку"):
         close_search(db, learner)
         return None
     filters = json.loads(state["filters"])

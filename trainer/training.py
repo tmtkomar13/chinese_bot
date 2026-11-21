@@ -55,8 +55,10 @@ def start(db, learner, extra=False):
 def create_session(db, learner, kind, cards, *, lesson=None, day=None):
     if not cards:
         return None
-    session = db.execute("INSERT INTO sessions(learner,day,kind,lesson) VALUES (?,?,?,?)",
-                         (learner, day or moscow_now().date().isoformat(), kind, lesson)).lastrowid
+    session = db.execute("""
+        INSERT INTO sessions(learner,day,kind,lesson,lesson_limit)
+        VALUES (?,?,?,?,(SELECT lesson FROM learners WHERE id=?))
+    """, (learner, day or moscow_now().date().isoformat(), kind, lesson, learner)).lastrowid
     db.executemany("INSERT INTO tasks(session,number,card) VALUES (?,?,?)",
                    ((session, i, card) for i, card in enumerate(cards, 1)))
     return session
@@ -65,6 +67,7 @@ def create_session(db, learner, kind, cards, *, lesson=None, day=None):
 def current_task(db, session):
     return db.execute("""
         SELECT t.*, c.hanzi, c.pinyin, c.pos, c.translation, coalesce(s.lesson,c.lesson) AS lesson,
+               s.lesson_limit,
                (SELECT count(*) FROM tasks WHERE session=t.session) AS total
         FROM tasks t JOIN cards c ON c.id=t.card JOIN sessions s ON s.id=t.session
         WHERE session=? AND (grade IS NULL OR phase!='') ORDER BY number LIMIT 1
@@ -96,11 +99,9 @@ def apply_action(db, learner, session, number, action):
     """, (learner, task["card"], int(not known), int(action == "no"),
           None if known else action, int(known), action, time.time_ns()))
     if task["translate"]:
-        words = db.execute("""SELECT c.hanzi FROM cards c CROSS JOIN learners l
-            WHERE l.id=? AND (EXISTS(SELECT 1 FROM lesson_cards lc
-                WHERE lc.card_key=c.id AND lc.lesson<=l.lesson)
-                OR (c.lesson<=l.lesson AND NOT EXISTS(
-                    SELECT 1 FROM lesson_cards lc WHERE lc.card_key=c.id)))""", (learner,))
+        words = db.execute("""SELECT c.hanzi FROM cards c
+            WHERE coalesce((SELECT min(lc.lesson) FROM lesson_cards lc WHERE lc.card_key=c.id),
+                           c.lesson)<=?""", (task["lesson_limit"],))
         allowed = "".join(sorted({char for row in words for char in row[0] if '㐀' <= char <= '鿿'}))
         db.execute("""UPDATE tasks SET phase='generate', allowed=?,
                       difficulty=(SELECT difficulty FROM learners WHERE id=?)
