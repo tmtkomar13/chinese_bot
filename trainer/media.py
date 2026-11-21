@@ -11,7 +11,7 @@ TIMING = json.loads((ASSETS / "speeds.json").read_text(encoding="utf-8"))
 
 
 def style_for(speed):
-    return "ink-144-transparent-v4-" + speed
+    return "ink-144-white-v5-" + speed
 
 
 STYLE = style_for("normal")
@@ -33,7 +33,7 @@ def render(word, cache, speed="normal"):
     with sync_playwright() as pw:
         browser = pw.chromium.launch(executable_path=os.getenv("CHROMIUM_PATH") or None)
         page = browser.new_page(viewport={"width": 144 * len(word), "height": 144})
-        page.set_content('<body style="margin:0;display:flex;background:white"></body>')
+        page.set_content('<body style="margin:0;display:flex;background:#fff;color:#000"></body>')
         page.clock.install(time="2025-01-01T00:00:00Z")
         page.clock.pause_at("2025-01-01T00:00:01Z")
         page.add_script_tag(path=str(ASSETS / "hanzi-writer.min.js"))
@@ -46,7 +46,8 @@ def render(word, cache, speed="normal"):
                     return null;
                 }
                 return HanziWriter.create(el, char, {width:144,height:144,padding:8,showCharacter:false,
-                    showOutline:true,...timing,charDataLoader:(_, resolve)=>resolve(data[i])});
+                    showOutline:true,strokeColor:"#000",outlineColor:"#ddd",...timing,
+                    charDataLoader:(_, resolve)=>resolve(data[i])});
             });
             await Promise.all(writers.filter(Boolean).map(w => w.getCharacterData()));
         }""", [word, data, TIMING[speed]])
@@ -80,8 +81,10 @@ def render(word, cache, speed="normal"):
         temp = Path(tmp.name)
     try:
         durations[-1] += 1200
+        # Grayscale palette index 255 is opaque white. Keep the preceding frame
+        # when the GIF encoder stores only the changed rectangle.
         frames[0].save(temp, save_all=True, append_images=frames[1:], duration=durations,
-                       loop=0, transparency=255, disposal=2, optimize=False)
+                       loop=0, background=255, disposal=1, optimize=False)
         os.replace(temp, gif)
     finally:
         temp.unlink(missing_ok=True)

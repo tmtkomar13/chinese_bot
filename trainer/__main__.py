@@ -13,6 +13,7 @@ def main():
     sub.add_parser("backup").add_argument("directory")
     sub.add_parser("check")
     sub.add_parser("gif-status")
+    sub.add_parser("topic-status")
     sub.add_parser("run")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -24,11 +25,14 @@ def main():
         elif args.command == "gif-status":
             from .worker import gif_status
             gif_status(db)
+        elif args.command == "topic-status":
+            from .topics import print_topic_status
+            print_topic_status(db)
         elif args.command == "check":
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or db.execute("PRAGMA foreign_key_check").fetchone():
                 raise SystemExit("Ошибка проверки SQLite")
             print("SQLite OK. Карточек по урокам:")
-            print(dict(db.execute("SELECT lesson,count(*) FROM cards GROUP BY lesson")))
+            print(dict(db.execute("SELECT lesson,count(*) FROM lesson_cards GROUP BY lesson")))
         else:
             from .vk import run
             run(db)

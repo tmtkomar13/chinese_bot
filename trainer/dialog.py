@@ -5,23 +5,18 @@ import re
 import time
 from urllib.parse import urlencode, urlsplit
 
+from .ai import LEVEL_LABELS as DIFFICULTIES, LEVELS
 from .media import style_for
-from .training import moscow_now
+from .review_dialog import handle_review
+from .screens import BACK, MENU, offer_resume, screen
+from .search_dialog import handle_search
+from .training import active_session, apply_action, current_task, moscow_now, start
 
-from .training import active_session, apply_action, current_task, start
 
-
-MENU = [[("Начать тренировку", "start"), ("Открытые уроки", "lessons")],
-        [("Точно знаю", "excluded"), ("Статистика", "stats")], [("Настройки", "settings")]]
-BACK = [("Меню", "menu")]
 LABELS = {label.casefold(): command for row in MENU for label, command in row}
+LABELS.update({"продолжить тренировку": "resume", "меню": "menu"})
 MODES = {"off": "Без анимации", "gif": "GIF в сообщении", "page": "Интерактивная страница"}
 SPEEDS = {"slow": "Медленно", "normal": "Обычно", "fast": "Быстро"}
-DIFFICULTIES = {"easy": "Лёгкий", "medium": "Средний", "hard": "Сложный"}
-
-
-def screen(text, buttons=None):
-    return {"text": text, "buttons": MENU if buttons is None else buttons}
 
 
 def exercise(db, session):
@@ -32,7 +27,7 @@ def exercise(db, session):
         counts = dict(db.execute("SELECT grade,count(*) FROM tasks WHERE session=? GROUP BY grade",
                                  (session,)))
         info = db.execute("SELECT day,kind FROM sessions WHERE id=?", (session,)).fetchone()
-        today = info["day"] == moscow_now().date().isoformat()
+        today = info["kind"] in ("daily", "extra") and info["day"] == moscow_now().date().isoformat()
         next_button = ("Дополнительная тренировка", f"extra {session}") if today else ("Подборка на сегодня", "start")
         return screen(f"Тренировка завершена.\nВспомнил — {counts.get('yes', 0)}"
                       f"\nНе вспомнил — {counts.get('no', 0)}\nТочно знаю — {counts.get('known', 0)}", [[next_button], BACK])
@@ -48,7 +43,8 @@ def exercise(db, session):
         return screen("Готовлю предложение…" if phase == "generate" else "Проверяю перевод…", [[skip], BACK])
     if phase == "waiting":
         question = json.loads(card["question"])
-        return screen((card["feedback"] or "Переведите на китайский.") + "\n" + question["ru"],
+        level = DIFFICULTIES[question.get("difficulty", card["difficulty"])]
+        return screen((card["feedback"] or "Переведите на китайский.") + f"\nУровень — {level}\n" + question["ru"],
                       [[("Показать перевод", f"solution {token}"), skip], BACK])
     db.execute("""UPDATE tasks SET translate=coalesce(translate,(SELECT translations FROM learners
                   JOIN sessions ON learners.id=sessions.learner WHERE sessions.id=?)) WHERE session=? AND number=?""",
@@ -68,8 +64,14 @@ def exercise(db, session):
         base = os.getenv("STROKES_PAGE_URL", "").strip()
         url = urlsplit(base)
         if url.scheme in ("http", "https") and url.netloc and not url.query and not url.fragment:
-            query = urlencode({"word": card["hanzi"], "speed": prefs["speed"]})
-            reply["buttons"].insert(0, [("Порядок черт", base + "?" + query)])
+            codes = "-".join(format(ord(char), "x") for char in card["hanzi"])
+            query = urlencode({"chars": codes, "speed": prefs["speed"]})
+            link = base + "?" + query
+            if "{chars}" in url.path:
+                link = base.replace("{chars}", codes).replace("{speed}", prefs["speed"])
+            reply["buttons"].insert(0, [("Порядок черт", link)])
+            if url.scheme == "http":
+                reply["text"] += "\nПропись в домашней сети: " + link
         else:
             reply["text"] += "\nИнтерактивная страница временно недоступна."
         return reply
@@ -120,7 +122,8 @@ def excluded(db, learner, page):
 
 
 def lessons(db, learner, new=None):
-    maximum = db.execute("SELECT coalesce(max(lesson), 1) FROM cards").fetchone()[0]
+    maximum = db.execute("""SELECT max(coalesce((SELECT max(lesson) FROM lesson_cards), 1),
+                                        coalesce((SELECT max(lesson) FROM cards), 1))""").fetchone()[0]
     if new is not None and not 1 <= new <= maximum:
         return screen(f"Введите «урок N», где N от 1 до {maximum}.", [BACK])
     if new is not None:
@@ -156,6 +159,8 @@ def settings(db, learner):
 
 def respond(db, learner, text, command=None):
     db.execute("INSERT OR IGNORE INTO learners(id) VALUES (?)", (learner,))
+    if reply := handle_search(db, learner, text, command):
+        return reply
     if command is None:
         original = text.strip()
         text = original.casefold()
@@ -177,13 +182,17 @@ def respond(db, learner, text, command=None):
             return exercise(db, card["session"])
         match = re.fullmatch(r"урок\s+(\d{1,5})", text)
         command = "lesson " + match[1] if match else LABELS.get(text, "menu")
+    if command == "resume":
+        current = active_session(db, learner)
+        return exercise(db, current) if current else screen("Нет незавершённой тренировки.")
+    if reply := handle_review(db, learner, command, exercise):
+        return reply
     if command == "settings":
         return settings(db, learner)
     if command == "difficulty":
-        return screen("Выберите уровень для следующих предложений.\n\n"
-                      "Лёгкий — простые фразы вроде «Я учитель».\n"
-                      "Средний — повседневные ситуации с деталями, например «По дороге домой я купил три яблока».\n"
-                      "Сложный — образные фразы, где важно передать оттенок смысла, например «Дождь стих, и город словно выдохнул».",
+        descriptions = "\n".join(f"{DIFFICULTIES[key]} — {description}"
+                                 for key, description in LEVELS.items())
+        return screen("Выберите уровень для следующих предложений.\n\n" + descriptions,
                       [[(label, f"difficulty {key}") for key, label in DIFFICULTIES.items()],
                        [("Настройки", "settings")]])
     if command.startswith("difficulty ") and command.split(" ", 1)[1] in DIFFICULTIES:
@@ -209,10 +218,13 @@ def respond(db, learner, text, command=None):
                     advance(db, card)
         return settings(db, learner)
     if match := re.fullmatch(r"extra (\d{1,18})", command):
-        session = db.execute("SELECT id FROM sessions WHERE learner=? AND finished=1 AND day=? ORDER BY id DESC LIMIT 1",
+        if active_session(db, learner):
+            return offer_resume()
+        session = db.execute("""SELECT id FROM sessions WHERE learner=? AND finished=1 AND day=?
+                             AND kind IN ('daily','extra') ORDER BY id DESC LIMIT 1""",
                              (learner, moscow_now().date().isoformat())).fetchone()
         return exercise(db, start(db, learner, extra=bool(session and session[0] == int(match[1]))))
-    if match := re.fullmatch(r"(skip|solution|retry|next) (\d{1,18}) (\d{1,3})", command):
+    if match := re.fullmatch(r"(skip|solution|retry|next) (\d{1,18}) (\d{1,18})", command):
         action, sid, num = match.groups()
         current = active_session(db, learner)
         card = current_task(db, current)
@@ -232,8 +244,10 @@ def respond(db, learner, text, command=None):
                 db.execute("INSERT INTO jobs(session,number,kind) VALUES (?,?,'check')", key)
         return exercise(db, current) if current else screen("Эта карточка уже закрыта.")
     if command == "start":
+        if active_session(db, learner):
+            return offer_resume()
         return exercise(db, start(db, learner))
-    card = re.fullmatch(r"(show|yes|no|known) (\d{1,18}) (\d{1,3})", command)
+    card = re.fullmatch(r"(show|yes|no|known) (\d{1,18}) (\d{1,18})", command)
     if card:
         action, session, number = card.groups()
         if apply_action(db, learner, int(session), int(number), action):

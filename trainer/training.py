@@ -1,5 +1,6 @@
 """Операции над текущей тренировкой. Вызываются внутри транзакции."""
 import random
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -44,13 +45,18 @@ def start(db, learner, extra=False):
     day = moscow_now().date().isoformat()
     daily = db.execute("SELECT id FROM sessions WHERE learner=? AND day=? AND kind='daily'", (learner, day)).fetchone()
     if daily and not extra:
-        return db.execute("SELECT max(id) FROM sessions WHERE learner=? AND day=?", (learner, day)).fetchone()[0]
+        return db.execute("""SELECT max(id) FROM sessions WHERE learner=? AND day=?
+                          AND kind IN ('daily','extra')""", (learner, day)).fetchone()[0]
     quantity = db.execute('SELECT quantity FROM learners WHERE id=?', (learner,)).fetchone()[0]
     cards = select_cards(db, learner, quantity)
+    return create_session(db, learner, "extra" if daily else "daily", cards, day=day)
+
+
+def create_session(db, learner, kind, cards, *, lesson=None, day=None):
     if not cards:
         return None
-    session = db.execute("INSERT INTO sessions(learner,day,kind) VALUES (?,?,?)",
-                         (learner, day, "extra" if daily else "daily")).lastrowid
+    session = db.execute("INSERT INTO sessions(learner,day,kind,lesson) VALUES (?,?,?,?)",
+                         (learner, day or moscow_now().date().isoformat(), kind, lesson)).lastrowid
     db.executemany("INSERT INTO tasks(session,number,card) VALUES (?,?,?)",
                    ((session, i, card) for i, card in enumerate(cards, 1)))
     return session
@@ -58,9 +64,9 @@ def start(db, learner, extra=False):
 
 def current_task(db, session):
     return db.execute("""
-        SELECT t.*, c.hanzi, c.pinyin, c.pos, c.translation, c.lesson,
+        SELECT t.*, c.hanzi, c.pinyin, c.pos, c.translation, coalesce(s.lesson,c.lesson) AS lesson,
                (SELECT count(*) FROM tasks WHERE session=t.session) AS total
-        FROM tasks t JOIN cards c ON c.id=t.card
+        FROM tasks t JOIN cards c ON c.id=t.card JOIN sessions s ON s.id=t.session
         WHERE session=? AND (grade IS NULL OR phase!='') ORDER BY number LIMIT 1
     """, (session,)).fetchone()
 
@@ -81,16 +87,21 @@ def apply_action(db, learner, session, number, action):
     db.execute("UPDATE tasks SET grade=? WHERE session=? AND number=?", (action, session, number))
     known = action == "known"
     db.execute("""
-        INSERT INTO progress(learner,card,attempts,errors,last_grade,known,revision)
-        VALUES (?,?,?,?,?,?,1)
+        INSERT INTO progress(learner,card,attempts,errors,last_grade,known,revision,last_rating,rated_at)
+        VALUES (?,?,?,?,?,?,1,?,?)
         ON CONFLICT(learner,card) DO UPDATE SET attempts=attempts+excluded.attempts,
             errors=errors+excluded.errors, last_grade=coalesce(excluded.last_grade,last_grade),
-            known=excluded.known, revision=revision+1
+            known=excluded.known, revision=revision+1, last_rating=excluded.last_rating,
+            rated_at=excluded.rated_at
     """, (learner, task["card"], int(not known), int(action == "no"),
-          None if known else action, int(known)))
+          None if known else action, int(known), action, time.time_ns()))
     if task["translate"]:
-        words = db.execute("SELECT hanzi FROM cards WHERE lesson<=(SELECT lesson FROM learners WHERE id=?)", (learner,))
-        allowed = "".join(sorted(set("".join(row[0] for row in words))))
+        words = db.execute("""SELECT c.hanzi FROM cards c CROSS JOIN learners l
+            WHERE l.id=? AND (EXISTS(SELECT 1 FROM lesson_cards lc
+                WHERE lc.card_key=c.id AND lc.lesson<=l.lesson)
+                OR (c.lesson<=l.lesson AND NOT EXISTS(
+                    SELECT 1 FROM lesson_cards lc WHERE lc.card_key=c.id)))""", (learner,))
+        allowed = "".join(sorted({char for row in words for char in row[0] if '㐀' <= char <= '鿿'}))
         db.execute("""UPDATE tasks SET phase='generate', allowed=?,
                       difficulty=(SELECT difficulty FROM learners WHERE id=?)
                       WHERE session=? AND number=?""", (allowed, learner, session, number))

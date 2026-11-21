@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
-from trainer.ai import generate
+from trainer.ai import generate, valid_question
 from trainer.dialog import respond
 from trainer.media import style_for
 from trainer.storage import database, import_vocabulary, transaction
@@ -16,6 +16,7 @@ from trainer.vk import accept, deliver, keyboard
 
 ROOT = Path(__file__).resolve().parents[1]
 Q = {"ru":"Я человек.", "zh":"我是人。", "pinyin":"wǒ shì rén", "explanation":"Утверждение."}
+VALID = {"syntax": True, "translation_matches": True, "level_matches": True}
 
 
 class DailyTest(unittest.TestCase):
@@ -83,13 +84,19 @@ class DailyTest(unittest.TestCase):
         self.conn.close()
         self.open()
         with patch.dict("os.environ", STROKES_PAGE_URL=""):
-            self.assertIn("временно недоступна", self.action("start")["text"])
+            self.assertIn("временно недоступна", self.action("resume")["text"])
         with patch.dict("os.environ", STROKES_PAGE_URL="http://192.168.1.10:8765/"):
-            rows = json.loads(keyboard(self.action("start")["buttons"]))["buttons"]
+            reply = self.action("resume")
+            rows = json.loads(keyboard(reply["buttons"]))["buttons"]
             link = rows[0][0]["action"]
             self.assertEqual(link["type"], "open_link")
-            self.assertIn("word=", link["link"])
-            self.assertIn("speed=slow", link["link"])
+            word = reply["text"].splitlines()[1].split(" · ")[0]
+            codes = "-".join(format(ord(char), "x") for char in word)
+            self.assertEqual(link["link"], f"http://192.168.1.10:8765/?chars={codes}&speed=slow")
+            self.assertIn(link["link"], reply["text"])
+        with patch.dict("os.environ", STROKES_PAGE_URL="https://example.org/{chars}-{speed}.html"):
+            rows = json.loads(keyboard(self.action("resume")["buttons"]))["buttons"]
+            self.assertEqual(rows[0][0]["action"]["link"], f"https://example.org/{codes}-slow.html")
 
     def test_pending_gif_rechecks_settings_and_grade(self):
         self.action("translations 0")
@@ -104,14 +111,14 @@ class DailyTest(unittest.TestCase):
             api = Mock()
             deliver(self.db, api, 1)
             api.messages.send.assert_not_called()
-            self.action("start")
+            self.action("resume")
             prepare_next_gif(self.db, None, 1, self.dir)
             self.action("animation off")
             self.action("animation gif")
             deliver(self.db, api, 1)
             api.messages.send.assert_not_called()
             self.action("speed normal")
-            self.action("start")
+            self.action("resume")
             prepare_next_gif(self.db, None, 1, self.dir)
             self.action("yes 1 1")
             deliver(self.db, api, 1)
@@ -126,7 +133,7 @@ class DailyTest(unittest.TestCase):
             deliver(self.db, api, 1)
             self.assertEqual(api.messages.send.call_args.kwargs["attachment"], "doc1_2")
             self.action("speed slow")
-            self.action("start")
+            self.action("resume")
             prepare_next_gif(self.db, None, 1, self.dir)
             with transaction(self.db):
                 accept(self.db, 1, {"from_id": 1, "peer_id": 1, "conversation_message_id": 10,
@@ -166,7 +173,7 @@ class DailyTest(unittest.TestCase):
         self.day += timedelta(minutes=2)
         self.conn.close()
         self.open()
-        self.assertIn("1 из 1", self.action("start")["text"])
+        self.assertIn("1 из 1", self.action("resume")["text"])
         self.action("show 1 1")
         self.assertIn("Подборка на сегодня", str(self.action("yes 1 1")["buttons"]))
         self.assertIn("1 из 3", self.action("start")["text"])
@@ -192,21 +199,21 @@ class DailyTest(unittest.TestCase):
         self.open()
         with patch("trainer.ai.generate", return_value=Q):
             self.job()
-        self.assertIn(Q["ru"], self.action("start")["text"])
+        self.assertIn(Q["ru"], self.action("resume")["text"])
         self.say("我")
         with patch("trainer.ai.check", return_value={"correct":False, "hint":"Проверьте сказуемое."}):
             self.job()
-        self.assertIn("сказуемое", self.action("start")["text"])
+        self.assertIn("сказуемое", self.action("resume")["text"])
         self.say("我是一个人。")
         self.conn.close()
         self.open()
         with patch("trainer.ai.check", side_effect=ConnectionError):
             self.job()
-        self.assertIn("сохранён", self.action("start")["text"])
+        self.assertIn("сохранён", self.action("resume")["text"])
         self.action("retry 1 1")
         with patch("trainer.ai.check", return_value={"correct":True, "hint":""}):
             self.job()
-        self.assertIn("Верно", self.action("start")["text"])
+        self.assertIn("Верно", self.action("resume")["text"])
         self.action("next 1 1")
         self.assertIn("Переводов выполнено — 1\nС первой попытки — 0", self.action("stats")["text"])
         attempts = self.db.execute("SELECT answer,correct FROM translation_attempts ORDER BY attempt")
@@ -269,18 +276,63 @@ class DailyTest(unittest.TestCase):
         self.open()
         self.assertIn("Средний", str(self.action("settings")["buttons"]))
         question = dict(Q, zh="人？", ru="Человек?")
-        with patch("trainer.ai.ask", return_value=question) as ask:
+        rejected = dict(VALID, level_matches=False)
+        with patch("trainer.ai.ask", side_effect=[question, rejected] * 6 + [question, VALID]) as ask:
             self.job()
-        self.assertIn("выразительную фразу", ask.call_args.args[0])
-        self.assertIn(question["ru"], self.action("start")["text"])
+        self.assertIn("двумя или более", ask.call_args_list[0].args[0])
+        self.assertIn("дополнительными деталями", ask.call_args_list[6].args[0])
+        self.assertIn("Короткое простое", ask.call_args_list[12].args[0])
+        self.assertIn("Независимо проверь", ask.call_args_list[13].args[0])
+        shown = self.action("resume")["text"]
+        self.assertIn("Уровень — Лёгкий", shown)
+        self.assertIn(question["ru"], shown)
+        self.action(levels["Сложный"])
+        self.assertEqual(self.action("resume")["text"], shown)
 
     def test_allowed_characters(self):
         task = {"hanzi":"人", "translation":"человек", "allowed":"我是人"}
         invalid = dict(Q, zh="我是超人。")
-        with patch("trainer.ai.ask", side_effect=[{},invalid,Q]) as ask:
-            self.assertEqual(generate(task), Q)
-            self.assertEqual(ask.call_count, 3)
+        with patch("trainer.ai.ask", side_effect=[{},invalid,Q,VALID]) as ask:
+            self.assertEqual(generate(task), dict(Q, difficulty="easy"))
+            self.assertEqual(ask.call_count, 4)
         with patch("trainer.ai.ask", return_value=invalid):
             with self.assertRaises(ValueError):
                 generate(task)
+        mixed = {"hanzi": "卡拉OK", "allowed": "我爱卡拉"}
+        self.assertTrue(valid_question(dict(Q, zh="我爱卡拉OK。"), mixed))
+        self.assertFalse(valid_question(dict(Q, zh="我爱卡拉OK OK。"), mixed))
+
+    def test_generation_accepts_requested_level_and_checks_translation(self):
+        examples = {
+            "easy": Q,
+            "medium": dict(Q, zh="我是北京人。", ru="Я из Пекина."),
+            "hard": dict(Q, zh="我是北京人，他是上海人。", ru="Я из Пекина, а он из Шанхая."),
+        }
+        for level, question in examples.items():
+            with self.subTest(level=level):
+                task = {"hanzi": "人", "translation": "человек", "allowed": "我是人北京他上海", "difficulty": level}
+                inaccurate = dict(question, ru="Я из Москвы.")
+                with patch("trainer.ai.ask", side_effect=[
+                    inaccurate, dict(VALID, translation_matches=False), question, VALID
+                ]) as ask:
+                    self.assertEqual(generate(task), dict(question, difficulty=level))
+                self.assertEqual(ask.call_count, 4)
+                self.assertEqual(ask.call_args_list[1].args[1]["ru"], inaccurate["ru"])
+
+    def test_generation_unavailable_or_exhausted_allows_next(self):
+        for owner, failure in ((2, ConnectionError()), (3, ValueError())):
+            with self.subTest(failure=type(failure).__name__):
+                with transaction(self.db):
+                    prompt = respond(self.db, owner, "", "start")
+                    _, session, number = prompt["buttons"][0][0][1].split()
+                    respond(self.db, owner, "", f"show {session} {number}")
+                    respond(self.db, owner, "", f"yes {session} {number}")
+                with patch("trainer.ai.generate", side_effect=failure):
+                    self.assertTrue(process(self.db, owner))
+                with transaction(self.db):
+                    screen = respond(self.db, owner, "", "resume")
+                    self.assertIn("Не удалось подготовить", screen["text"])
+                    label, command = screen["buttons"][0][0]
+                    self.assertEqual(label, "Далее")
+                    self.assertIn("Задание 2", respond(self.db, owner, "", command)["text"])
 

@@ -32,8 +32,8 @@ class UpgradeTest(unittest.TestCase):
                 self.assertGreater(message.lastrowid, 23)
                 self.assertEqual(db.execute("SELECT ts FROM vk_cursor").fetchone()[0], "55")
                 with transaction(db):
-                    self.assertIn("rén", respond(db, 12, "", "start")["text"])
-                    self.assertIn("Готовлю GIF", respond(db, 12, "", "start")["text"])
+                    self.assertIn("rén", respond(db, 12, "", "resume")["text"])
+                    self.assertIn("Готовлю GIF", respond(db, 12, "", "resume")["text"])
                     self.assertIn("Готовлю предложение", respond(db, 12, "", "yes 17 1")["text"])
                     self.assertIn("Подборка на сегодня", str(respond(db, 12, "", "skip 17 1")["buttons"]))
                     respond(db, 12, "", "start")

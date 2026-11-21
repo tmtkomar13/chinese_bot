@@ -8,6 +8,8 @@ from .worker import enqueue, remind, work
 
 from .training import moscow_now
 from .dialog import respond
+from .media import style_for
+from .search_dialog import search_is_open
 from .storage import transaction
 
 
@@ -49,18 +51,32 @@ def keyboard(buttons):
     return json.dumps({"one_time": False, "buttons": rows}, ensure_ascii=False)
 
 
+def is_current_gif(db, owner, reply):
+    matches = db.execute("""SELECT l.speed,m.style FROM learners l JOIN sessions s ON s.learner=l.id
+            JOIN tasks t ON t.session=s.id JOIN cards c ON c.id=t.card
+            JOIN media m ON m.word=c.hanzi AND m.attachment=?
+            WHERE l.id=? AND l.animation='gif' AND l.animation_revision=?
+              AND t.gif_request=l.animation_revision AND s.finished=0 AND s.id=? AND t.number=?""",
+                         (reply["attachment"], owner, reply["gif_revision"], *reply["task_state"][:2]))
+    return any(row["style"] == style_for(row["speed"]) for row in matches)
+
+
 def deliver(db, api, owner):
     for msg in db.execute("SELECT id, peer, reply FROM outbox WHERE peer=? ORDER BY id",
                           (owner,)).fetchall():
         reply = json.loads(msg["reply"])
-        if "gif_revision" in reply and not db.execute(
-                """SELECT 1 FROM learners l JOIN sessions s ON s.learner=l.id
-                   JOIN tasks t ON t.session=s.id WHERE l.id=? AND animation='gif'
-                   AND animation_revision=? AND t.gif_request=animation_revision
-                   AND s.finished=0 AND s.id=? AND t.number=?""",
-                (owner, reply["gif_revision"], *reply["task_state"][:2])).fetchone():
+        if "task_state" in reply and search_is_open(db, owner):
             db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
             continue
+        if "reminder_day" in reply and search_is_open(db, owner):
+            continue
+        if "gif_revision" in reply and not is_current_gif(db, owner, reply):
+            db.execute("DELETE FROM outbox WHERE id=?", (msg["id"],))
+            continue
+        if reply.get("attachment") and "gif_revision" not in reply and db.execute(
+                "SELECT 1 FROM media WHERE attachment=? LIMIT 1", (reply["attachment"],)).fetchone():
+            # V1 replies stored the GIF and the card keyboard together.
+            reply.pop("attachment")
         if "reminder_day" in reply:
             day = reply["reminder_day"]
             due = db.execute("""SELECT reminders FROM learners WHERE id=? AND NOT EXISTS(

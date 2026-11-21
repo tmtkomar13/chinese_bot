@@ -1,7 +1,13 @@
 "use strict";
 const el = id => document.getElementById(id);
 const query = new URLSearchParams(location.search);
-const letters = Array.from(query.get("word") ?? "你好");
+// VK links use ASCII code points. Previously sent links contain the word itself.
+const codes = query.get("chars");
+const letters = codes === null ? Array.from(query.get("word") ?? "你好") :
+  codes.split("-").map(code => {
+    const value = Number.parseInt(code, 16);
+    return /^[0-9a-f]{1,6}$/i.test(code) && value <= 0x10ffff ? String.fromCodePoint(value) : "�";
+  });
 const chars = [];
 const dataByLetter = new Map();
 const previews = [];

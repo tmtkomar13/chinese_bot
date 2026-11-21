@@ -36,8 +36,8 @@ def main():
         service("is-active", "chinese-trainer.service")
         remaining = db.execute("SELECT count(*) FROM tasks WHERE session=? AND grade IS NULL",
                                (session,)).fetchone()[0]
-        print(f"После перезапуска осталось {remaining} заданий. Нажмите «Начать тренировку» "
-              "и завершите оставшиеся задания.", flush=True)
+        print(f"После перезапуска осталось {remaining} заданий. Нажмите «Начать тренировку», "
+              "затем «Продолжить тренировку» и завершите оставшиеся задания.", flush=True)
         while not db.execute("SELECT finished FROM sessions WHERE id=?", (session,)).fetchone()[0]:
             time.sleep(1)
         grades = dict(db.execute("SELECT grade,count(*) FROM tasks WHERE session=? GROUP BY grade",

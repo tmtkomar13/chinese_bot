@@ -5,8 +5,10 @@ import threading
 import time
 from pathlib import Path
 
-from . import ai, media
-from .dialog import exercise, screen
+from . import ai, media, topics
+from .dialog import exercise
+from .screens import screen
+from .search_dialog import search_is_open
 from .storage import database, transaction
 from .training import active_session, current_task, moscow_now
 
@@ -24,12 +26,13 @@ def remind(db, owner, now=None):
                          (now.strftime("%H:%M"), owner)).fetchone()[0]
         daily = db.execute("SELECT finished FROM sessions WHERE learner=? AND kind='daily' AND day=?",
                            (owner, day)).fetchone()
-        if not due or (daily and daily[0]):
+        if not due or (daily and daily[0]) or search_is_open(db, owner):
             return
         if db.execute("INSERT OR IGNORE INTO reminders_sent VALUES (?,?)", (owner, day)).rowcount:
             active = db.execute("SELECT id FROM sessions WHERE learner=? AND finished=0", (owner,)).fetchone()
             verb = "Продолжить" if active else "Начать"
-            reply = screen("Время заниматься китайским.", [[(verb + " тренировку", "start")]])
+            reply = screen("Время заниматься китайским.",
+                           [[(verb + " тренировку", "resume" if active else "start")]])
             reply["reminder_day"] = day
             enqueue(db, owner, reply)
 
@@ -56,7 +59,7 @@ def process(db, owner):
         if not db.execute("DELETE FROM jobs WHERE id=?", (job["job_id"],)).rowcount:
             return True
         if kind == "generate" and failed:
-            fields = ("result", "Сейчас нет подходящего задания.", None, None)
+            fields = ("result", "Не удалось подготовить предложение для этой карточки. Нажмите «Далее».", None, None)
         elif kind == "generate":
             fields = ("waiting", None, json.dumps(question, ensure_ascii=False), None)
         elif failed:
@@ -71,9 +74,10 @@ def process(db, owner):
             if kind == "check" and not failed:
                 db.execute("UPDATE translation_attempts SET correct=?,hint=? WHERE session=? AND number=? AND attempt=?",
                            (result["correct"], result["hint"], *key, job["tries"]))
-            reply = exercise(db, job["session"])
-            reply["task_state"] = [*key, fields[0], job["tries"]]
-            enqueue(db, owner, reply)
+            if not search_is_open(db, owner):
+                reply = exercise(db, job["session"])
+                reply["task_state"] = [*key, fields[0], job["tries"]]
+                enqueue(db, owner, reply)
     return True
 
 
@@ -189,6 +193,7 @@ def warm_media(path, owner, stop):
 def work(path, owner, stop):
     thread = threading.Thread(target=warm_media, args=(path, owner, stop), daemon=True)
     thread.start()
+    threading.Thread(target=topics.warm_topics, args=(path, stop), daemon=True).start()
     with database(path) as db:
         while not stop.is_set():
             try:

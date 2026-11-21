@@ -51,12 +51,16 @@ def database(path, *, create=False):
                         statement = ""
                 if statement.strip():
                     raise ValueError(f"Незавершённый SQL в {script.name}")
+                if number == 7 and db.execute("SELECT 1 FROM cards LIMIT 1").fetchone():
+                    _backfill_lessons(db)
                 db.execute(f"PRAGMA user_version={number}")
         yield db
 
 
-def import_vocabulary(db, path):
+def _read_vocabulary(path):
     entries = {}
+    occurrences = {}
+    positions = {}
     with open(path, encoding="utf-8-sig", newline="") as stream:
         reader = csv.reader(stream, delimiter="\t", strict=True)
         if next(reader, []) != ["key", "lesson", "hanzi", "pinyin", "pos", "translation"]:
@@ -74,20 +78,43 @@ def import_vocabulary(db, path):
                     previous, earliest = entries[key]
                     if previous != values:
                         raise ValueError(f"Разные значения под ключом {key}")
-                    lesson = min(earliest, lesson)
-                entries[key] = (values, lesson)
+                else:
+                    earliest = lesson
+                entries[key] = (values, min(earliest, lesson))
+                positions[lesson] = positions.get(lesson, 0) + 1
+                occurrences.setdefault((lesson, key), positions[lesson])
             except ValueError as exc:
                 raise ValueError(f"Строка {reader.line_num}: {exc}") from exc
     if not entries:
         raise ValueError("Пустой словарь")
+    return entries, occurrences
+
+
+def _store_occurrences(db, occurrences):
+    db.executemany("""INSERT INTO lesson_cards(lesson,card_key,position) VALUES (?,?,?)
+        ON CONFLICT(lesson,card_key) DO UPDATE SET position=excluded.position""",
+                   ((lesson, key, position) for (lesson, key), position in occurrences.items()))
+
+
+def _backfill_lessons(db):
+    source = Path(__file__).resolve().parents[1] / "data" / "vocabulary.tsv"
+    _, occurrences = _read_vocabulary(source)
+    keys = {row[0] for row in db.execute("SELECT id FROM cards")}
+    _store_occurrences(db, {pair: position for pair, position in occurrences.items() if pair[1] in keys})
+
+
+def import_vocabulary(db, path):
+    entries, occurrences = _read_vocabulary(path)
     with transaction(db):
         db.executemany("""
             INSERT INTO cards(id, hanzi, pinyin, pos, translation, lesson)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET hanzi=excluded.hanzi, pinyin=excluded.pinyin,
                 pos=excluded.pos, translation=excluded.translation,
-                lesson=min(cards.lesson, excluded.lesson)
+                lesson=excluded.lesson
         """, ((key, *values, lesson) for key, (values, lesson) in entries.items()))
+        db.executemany("DELETE FROM lesson_cards WHERE card_key=?", ((key,) for key in entries))
+        _store_occurrences(db, occurrences)
     return len(entries)
 
 

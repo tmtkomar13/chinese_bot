@@ -32,6 +32,14 @@ def check(base):
         page = browser.new_page(viewport={"width": 390, "height": 844})
         errors = []
         page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(base + "?chars=5e08-5085&speed=normal")
+        page.locator("#start").click()
+        assert page.locator("#word").inner_text() == "师傅"
+        assert page.locator("#notice").inner_text() == ""
+        for char in "师傅":
+            page.wait_for_function("c => writer?._char === c && writer._quiz?._isActive", arg=char)
+            trace_character(page, char)
+        page.wait_for_function("() => pass === 1 && writer._char === '师'")
         page.goto(base + "?" + urlencode({"word": "人〇大", "speed": "fast"}))
         page.wait_for_selector("#start:enabled")
         assert "〇" in page.locator("#notice").inner_text()
